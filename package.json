@@ -1,0 +1,14 @@
+{
+  "name": "tidewater-workspace",
+  "private": true,
+  "license": "Apache-2.0",
+  "packageManager": "pnpm@11.5.2",
+  "engines": {
+    "node": ">=24"
+  },
+  "scripts": {
+    "dev": "pnpm --filter @tidewater/desktop tauri dev",
+    "build": "pnpm --filter @tidewater/desktop tauri build",
+    "typecheck": "pnpm --filter @tidewater/desktop typecheck"
+  }
+}

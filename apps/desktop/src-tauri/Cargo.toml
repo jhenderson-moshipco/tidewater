@@ -1,0 +1,17 @@
+[package]
+name = "tidewater"
+version = "0.1.0"
+description = "Open-source Postgres client"
+license = "Apache-2.0"
+edition = "2024"
+rust-version = "1.85"
+
+[lib]
+name = "tidewater_lib"
+crate-type = ["rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
