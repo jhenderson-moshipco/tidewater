@@ -37,6 +37,14 @@ Before writing an effect, use the table below to decide an option, if none match
 - A component takes a single typed view-model object rather than a long list of props.
 - Every control has an accessible name and works from the keyboard. Results of async actions are announced, and nothing is signalled by color alone.
 
+## Types from the Rust core
+
+Every type the frontend sends to or receives from the Rust core is generated from the Rust structs with ts-rs, into `src/generated/`. Don't edit those files or write the same types by hand. After changing a Rust type, regenerate them by running the Rust tests:
+
+```bash
+cd apps/desktop/src-tauri && cargo test
+```
+
 ## Naming and style
 
 - File names are lowercase and hyphenated: `activity-bar.tsx`, `menu-commands.ts`. Tool config files keep the names their tools expect.
