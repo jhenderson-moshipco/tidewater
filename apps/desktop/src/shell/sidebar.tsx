@@ -1,3 +1,4 @@
+import { Explorer, ExplorerActions } from '../servers/explorer';
 import { useWorkspaceStore } from '../store/workspace';
 import classes from './shell.module.css';
 import { findView } from './views';
@@ -8,10 +9,13 @@ export function Sidebar() {
 
   return (
     <aside aria-labelledby="sidebar-title" className={classes.sidebar}>
-      <h2 id="sidebar-title" className={classes.sidebarHeader}>
-        {definition.title}
-      </h2>
-      <p className={classes.sidebarEmpty}>{definition.empty}</p>
+      <div className={classes.sidebarHeader}>
+        <h2 id="sidebar-title" tabIndex={-1} className={classes.sidebarTitle}>
+          {definition.title}
+        </h2>
+        {active_view === 'explorer' && <ExplorerActions />}
+      </div>
+      {active_view === 'explorer' ? <Explorer /> : <p className={classes.sidebarEmpty}>{definition.empty}</p>}
     </aside>
   );
 }

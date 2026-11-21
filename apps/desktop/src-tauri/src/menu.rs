@@ -4,7 +4,8 @@ use tauri::menu::{AboutMetadata, Menu, MenuEvent, MenuItem, PredefinedMenuItem, 
 use tauri::{AppHandle, Emitter, Runtime};
 
 /// these id's get forwarded to the frontend
-const FORWARDED: [&str; 6] = [
+const FORWARDED: [&str; 7] = [
+    "new_connection",
     "view_explorer",
     "view_search",
     "view_files",
@@ -53,7 +54,7 @@ const APP_MENU: &[Entry] = &[
 
 const FILE_MENU: &[Entry] = &[
     Planned("New Query Tab", Some("CmdOrCtrl+T")),
-    Planned("New Connection…", Some("CmdOrCtrl+Shift+N")),
+    Action("new_connection", "New Connection…", Some("CmdOrCtrl+Shift+N")),
     Separator,
     Planned("Open .sql File…", Some("CmdOrCtrl+O")),
     Planned("Save", Some("CmdOrCtrl+S")),

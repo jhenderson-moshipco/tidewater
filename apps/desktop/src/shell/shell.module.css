@@ -59,13 +59,20 @@
   height: 36px;
   display: flex;
   align-items: center;
-  padding: 0 12px;
+  gap: 2px;
+  padding: 0 6px 0 12px;
   border-bottom: 1px solid var(--tw-border);
   font-size: var(--tw-font-size-label);
   font-weight: 600;
   letter-spacing: 0.08em;
   text-transform: uppercase;
   color: var(--tw-text-muted);
+}
+
+.sidebarTitle {
+  flex: 1 1 auto;
+  font: inherit;
+  letter-spacing: inherit;
 }
 
 .sidebarEmpty {

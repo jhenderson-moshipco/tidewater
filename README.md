@@ -77,7 +77,7 @@ A few tests connect to a real server. They're skipped unless you point them at o
 TIDEWATER_TEST_DATABASE_URL="postgres://user:password@localhost:5432/postgres" cargo test -- --ignored
 ```
 
-The app is an early shell: the window, menus, themes and workspace layout are in place. The Rust core can save servers and connect to them, and the screens for that are next.
+The app is early: you can save servers and groups, test a connection step by step, and connect and disconnect. Running queries is next.
 
 ## Documentation
 
