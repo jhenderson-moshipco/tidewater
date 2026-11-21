@@ -37,14 +37,39 @@ Tidewater is built on Tauri, so it uses the operating system's own web view inst
 
 ## Install
 
-There is no release to install yet. Build instructions will be added here along with the first version of the app.
+There is no release to install yet. To build from source you need:
+
+- Node.js 24 or later and pnpm 11
+- Rust (stable)
+- The system packages Tauri needs on your platform, listed in the [Tauri prerequisites](https://v2.tauri.app/start/prerequisites/)
+
+Then install the JavaScript dependencies:
+
+```bash
+git clone https://github.com/jhenderson-moshipco/tidewater.git
+cd tidewater
+pnpm install
+```
 
 ## Usage
 
-Tidewater can't be used yet. The repository currently holds the license, this README and the brand assets.
+Run the app in development mode:
+
+```bash
+pnpm dev
+```
+
+Build an installer for your platform:
+
+```bash
+pnpm build
+```
+
+The app is an early shell: the window, menus, themes and workspace layout are in place, and connecting to a server is not built yet.
 
 ## Documentation
 
+- [Frontend guide](docs/frontend.md): where state lives, when effects are allowed, and the component and naming conventions.
 - [Brand and icons](docs/brand.md): the mark, how the icon files are generated, and where each one is used.
 
 ## Contributing
