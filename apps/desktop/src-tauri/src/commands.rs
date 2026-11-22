@@ -7,6 +7,8 @@ use crate::connections::probe::{ProbeResult, probe};
 use crate::connections::url::{ParsedConnection, parse_connection_string};
 use crate::connections::{ConnectParams, ConnectionInfo, ConnectionManager};
 use crate::error::CommandError;
+use crate::query::split::{self, StatementSpan};
+use crate::query::{QuerySessions, RowBatch, RunResult};
 use crate::servers::model::{GroupInput, PasswordChange, ServerGroup, ServerInput, ServerListView, ServerSummary};
 use crate::servers::store::{ServerStore, StoreStatusView};
 use crate::servers::vault::OsKeychain;
@@ -39,9 +41,15 @@ pub fn save_server(store: State<'_, Store>, input: ServerInput) -> Result<Server
 }
 
 #[tauri::command]
-pub async fn delete_server(store: State<'_, Store>, connections: State<'_, ConnectionManager>, id: String) -> Result<(), CommandError> {
+pub async fn delete_server(
+    store: State<'_, Store>,
+    connections: State<'_, ConnectionManager>,
+    queries: State<'_, QuerySessions>,
+    id: String,
+) -> Result<(), CommandError> {
     store.update(|list| list.delete_server(&id))?;
     connections.disconnect(&id).await;
+    queries.close_server(&id).await;
     Ok(())
 }
 
@@ -117,6 +125,42 @@ pub async fn catalog_children(
     nodes.map_err(CommandError::from)
 }
 
+/// Where each statement in the editor text starts and ends.
+#[tauri::command]
+pub fn split_statements(sql: String) -> Vec<StatementSpan> {
+    split::split(&sql).into_iter().map(|statement| statement.span).collect()
+}
+
+/// Runs the statements in `sql` on the tab's own session for this server and database.
+#[tauri::command(rename_all = "snake_case")]
+pub async fn run_query(
+    store: State<'_, Store>,
+    queries: State<'_, QuerySessions>,
+    tab_id: String,
+    server_id: String,
+    database: String,
+    sql: String,
+) -> Result<RunResult, CommandError> {
+    let mut params = store.read(|list| Ok(ConnectParams::from(list.find(&server_id)?)))?;
+    params.database = database;
+    queries.run(&tab_id, &server_id, &params, &sql).await
+}
+
+#[tauri::command(rename_all = "snake_case")]
+pub async fn fetch_more_rows(queries: State<'_, QuerySessions>, tab_id: String) -> Result<RowBatch, CommandError> {
+    queries.fetch_more(&tab_id).await
+}
+
+#[tauri::command(rename_all = "snake_case")]
+pub async fn cancel_query(queries: State<'_, QuerySessions>, tab_id: String) -> Result<(), CommandError> {
+    queries.cancel(&tab_id).await
+}
+
+#[tauri::command(rename_all = "snake_case")]
+pub fn close_query_tab(queries: State<'_, QuerySessions>, tab_id: String) {
+    queries.close(&tab_id);
+}
+
 #[cfg(test)]
 mod tests {
     use serde_json::{Value, json};
@@ -134,14 +178,14 @@ mod tests {
     const APP_URL: &str = "tauri://localhost";
 
     struct TestApp {
-        _app: App<MockRuntime>,
+        app: App<MockRuntime>,
         window: WebviewWindow<MockRuntime>,
         _folder: tempfile::TempDir,
     }
 
     fn with_window(app: App<MockRuntime>, folder: tempfile::TempDir) -> TestApp {
         let window = WebviewWindowBuilder::new(&app, "main", Default::default()).build().unwrap();
-        TestApp { _app: app, window, _folder: folder }
+        TestApp { app, window, _folder: folder }
     }
 
     /// The real app on Tauri's mock runtime, with its saved servers in a temporary folder.
@@ -181,7 +225,7 @@ mod tests {
             "user": "tidewater",
             "password": password,
             "tls": "disable",
-            "session": { "read_only": false, "statement_timeout_ms": null },
+            "session": { "read_only": false, "statement_timeout_ms": null, "results_timeout_ms": 300_000 },
         })
     }
 
@@ -224,7 +268,7 @@ mod tests {
         let app = test_app();
         let with_arguments = [
             "unlock_store", "save_server", "delete_server", "save_group", "delete_group", "test_connection", "connect_server",
-            "disconnect_server", "catalog_children",
+            "disconnect_server", "catalog_children", "run_query", "fetch_more_rows", "cancel_query", "close_query_tab",
         ];
 
         for command in ["store_status", "start_fresh_store", "list_servers", "list_connections"].iter().chain(&with_arguments) {
@@ -233,6 +277,7 @@ mod tests {
         for command in ["delete_server", "connect_server", "catalog_children"] {
             assert!(refusal(&store_only, command).starts_with("state not managed for field `connections`"), "{command}");
         }
+        assert!(refusal(&store_only, "run_query").starts_with("state not managed for field `queries`"));
         for command in with_arguments {
             assert!(refusal(&app, command).contains("missing required key"), "{command}");
         }
@@ -240,6 +285,12 @@ mod tests {
         assert!(unreadable_path.unwrap_err().as_str().unwrap().contains("path"));
         let no_toggle = app.invoke("catalog_children", json!({ "server_id": "a" }));
         assert!(no_toggle.unwrap_err().as_str().unwrap().contains("missing required key show_system"));
+        for (keys, missing) in [(json!({ "tab_id": "a" }), "server_id"), (json!({ "tab_id": "a", "server_id": "b" }), "database")] {
+            let refused = app.invoke("run_query", keys).unwrap_err();
+            assert!(refused.as_str().unwrap().contains(&format!("missing required key {missing}")));
+        }
+        let no_sql = app.invoke("run_query", json!({ "tab_id": "a", "server_id": "b", "database": "c" }));
+        assert!(no_sql.unwrap_err().as_str().unwrap().contains("missing required key sql"));
         assert_eq!(app.invoke("list_servers", json!({})), Ok(json!({ "groups": [], "servers": [] })));
     }
     #[test]
@@ -310,5 +361,50 @@ mod tests {
         assert_eq!(app.invoke("connect_server", json!({ "id": saved["id"] })).map_err(kind), Err("connection".into()));
         assert_eq!(app.invoke("disconnect_server", json!({ "id": saved["id"] })), Ok(Value::Null));
         assert_eq!(app.invoke("list_connections", json!({})), Ok(json!([])));
+    }
+
+    #[test]
+    fn statements_are_split_into_editor_spans() {
+        let app = test_app();
+        let spans = app.invoke("split_statements", json!({ "sql": "SELECT 1; SELECT ';'" })).unwrap();
+        assert_eq!(spans, json!([{ "from": 0, "to": 8 }, { "from": 10, "to": 20 }]));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_query_on_an_unknown_server_is_not_found_and_an_idle_tab_closes_quietly() {
+        let app = test_app();
+        let run = json!({ "tab_id": "tab", "server_id": "missing", "database": "postgres", "sql": "SELECT 1" });
+
+        assert_eq!(app.invoke("run_query", run).map_err(kind), Err("not_found".into()));
+        assert_eq!(app.invoke("fetch_more_rows", json!({ "tab_id": "tab" })).map_err(kind), Err("invalid".into()));
+        assert_eq!(app.invoke("cancel_query", json!({ "tab_id": "tab" })), Ok(Value::Null));
+        assert_eq!(app.invoke("close_query_tab", json!({ "tab_id": "tab" })), Ok(Value::Null));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    #[ignore = "needs TIDEWATER_TEST_DATABASE_URL pointing at a running Postgres"]
+    async fn live_a_query_tab_runs_fetches_more_and_hears_its_idle_results_close() {
+        use tauri::Listener;
+
+        let app = test_app();
+        let live = crate::testing::live_params();
+        let mut input = server_input(None, live.port, json!({ "action": "set", "value": live.password }));
+        input["host"] = json!(live.host);
+        input["user"] = json!(live.user);
+        input["tls"] = json!("require");
+        input["session"]["results_timeout_ms"] = json!(100);
+        let id = app.invoke("save_server", json!({ "input": input })).unwrap()["id"].clone();
+        let (sender, mut closed) = tokio::sync::mpsc::unbounded_channel();
+        app.app.listen(crate::RESULTS_CLOSED_EVENT, move |event| sender.send(event.payload().to_string()).unwrap());
+        let sql = "SELECT g FROM generate_series(1, 1200) g";
+
+        let run = app.invoke("run_query", json!({ "tab_id": "tab", "server_id": id, "database": live.database, "sql": sql })).unwrap();
+        let more = app.invoke("fetch_more_rows", json!({ "tab_id": "tab" })).unwrap();
+
+        assert_eq!((run["transaction"].as_str(), run["statements"][0]["outcome"]["has_more"].as_bool()), (Some("holding_results"), Some(true)));
+        assert_eq!(more["rows"][0][0], "501");
+        let heard = tokio::time::timeout(std::time::Duration::from_secs(5), closed.recv()).await.unwrap();
+        assert_eq!(heard.as_deref(), Some("\"tab\""));
+        assert_eq!(app.invoke("delete_server", json!({ "id": id })), Ok(Value::Null));
     }
 }

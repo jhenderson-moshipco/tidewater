@@ -17,7 +17,7 @@ describe('the dialog store', () => {
   });
 
   it('editing starts from the saved server, in seconds and without its password', () => {
-    const saved = server({ group_id: 'orders', session: { read_only: true, statement_timeout_ms: 15_000 }, has_password: true });
+    const saved = server({ group_id: 'orders', session: { read_only: true, statement_timeout_ms: 15_000, results_timeout_ms: 300_000 }, has_password: true });
 
     state().openConnection(saved);
 

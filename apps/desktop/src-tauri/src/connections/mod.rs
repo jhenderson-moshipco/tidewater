@@ -65,7 +65,7 @@ pub fn session_options(session: &SessionDefaults) -> String {
     parts.join(" ")
 }
 
-fn build_config(params: &ConnectParams) -> Config {
+pub(crate) fn build_config(params: &ConnectParams) -> Config {
     let mut config = Config::new();
     config
         .host(&params.host)
@@ -210,7 +210,7 @@ mod tests {
 
     #[test]
     fn session_options_set_read_only_and_statement_timeout() {
-        let session = SessionDefaults { read_only: true, statement_timeout_ms: Some(15_000) };
+        let session = SessionDefaults { read_only: true, statement_timeout_ms: Some(15_000), ..SessionDefaults::default() };
         assert_eq!(session_options(&session), "-c default_transaction_read_only=on -c statement_timeout=15000");
     }
 
@@ -324,7 +324,7 @@ mod tests {
     #[ignore = "needs TIDEWATER_TEST_DATABASE_URL pointing at a running Postgres"]
     async fn live_session_defaults_reach_the_server() {
         let mut params = live_params();
-        params.session = SessionDefaults { read_only: true, statement_timeout_ms: Some(15_000) };
+        params.session = SessionDefaults { read_only: true, statement_timeout_ms: Some(15_000), ..SessionDefaults::default() };
         let (client, driver) = open(&params).await.unwrap();
         let row = client
             .query_one("SELECT current_setting('default_transaction_read_only'), current_setting('statement_timeout')", &[])

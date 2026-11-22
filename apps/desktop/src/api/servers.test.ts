@@ -2,6 +2,7 @@ import type { InvokeArgs } from '@tauri-apps/api/core';
 import { describe, expect, it } from 'vitest';
 import { mockCommands, serverInput } from '../testing/backend';
 import { catalogChildren } from './catalog';
+import * as query from './query';
 import * as api from './servers';
 
 const input = serverInput();
@@ -21,6 +22,15 @@ const commands: Array<[string, () => Promise<unknown>, InvokeArgs]> = [
   ['disconnect_server', () => api.disconnectServer('orders-dev'), { id: 'orders-dev' }],
   ['list_connections', () => api.listConnections(), {}],
   ['catalog_children', () => catalogChildren('orders-dev', null, true), { server_id: 'orders-dev', path: null, show_system: true }],
+  ['split_statements', () => query.splitStatements('SELECT 1'), { sql: 'SELECT 1' }],
+  [
+    'run_query',
+    () => query.runQuery('tab-1', 'orders-dev', 'orders', 'SELECT 1'),
+    { tab_id: 'tab-1', server_id: 'orders-dev', database: 'orders', sql: 'SELECT 1' },
+  ],
+  ['fetch_more_rows', () => query.fetchMoreRows('tab-1'), { tab_id: 'tab-1' }],
+  ['cancel_query', () => query.cancelQuery('tab-1'), { tab_id: 'tab-1' }],
+  ['close_query_tab', () => query.closeQueryTab('tab-1'), { tab_id: 'tab-1' }],
 ];
 
 describe('the Rust command wrappers', () => {

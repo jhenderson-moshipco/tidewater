@@ -21,7 +21,7 @@ function server(id: string, group_id: string | null = null): ServerSummary {
     user: 'app',
     has_password: false,
     tls: 'prefer',
-    session: { read_only: false, statement_timeout_ms: null },
+    session: { read_only: false, statement_timeout_ms: null, results_timeout_ms: 300_000 },
   };
 }
 

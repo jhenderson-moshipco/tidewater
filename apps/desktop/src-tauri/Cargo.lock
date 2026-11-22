@@ -4404,6 +4404,7 @@ dependencies = [
  "argon2",
  "base64 0.23.1",
  "fernet",
+ "futures-util",
  "getrandom 0.4.3",
  "keyring",
  "rcgen",

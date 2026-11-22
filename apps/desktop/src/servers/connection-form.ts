@@ -32,6 +32,9 @@ export const outcome_labels: Readonly<Record<StepOutcome, string>> = {
   skipped: 'skipped',
 };
 
+/** Matches the Rust core's default for a new server. */
+export const default_results_timeout_ms = 5 * 60 * 1000;
+
 export function environmentLabel(environment: Environment): string {
   return environments.find((option) => option.value === environment)?.label ?? environment;
 }
@@ -114,6 +117,7 @@ export function readConnectionForm(form: HTMLFormElement, editing: ServerSummary
     session: {
       read_only: draft.read_only,
       statement_timeout_ms: draft.statement_timeout_s === '' ? null : Math.round(draft.statement_timeout_s * 1000),
+      results_timeout_ms: editing?.session.results_timeout_ms ?? default_results_timeout_ms,
     },
   };
 }

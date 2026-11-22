@@ -103,8 +103,14 @@ describe('readConnectionForm', () => {
       user: 'postgres',
       password: { action: 'clear' },
       tls: 'prefer',
-      session: { read_only: true, statement_timeout_ms: 1500 },
+      session: { read_only: true, statement_timeout_ms: 1500, results_timeout_ms: 300_000 },
     });
+  });
+
+  it("keeps an edited server's results timeout, which has no field in the form", () => {
+    const form = formWith(all_fields);
+    const editing = server({ session: { read_only: false, statement_timeout_ms: null, results_timeout_ms: 60_000 } });
+    expect(readConnectionForm(form, editing).session.results_timeout_ms).toBe(60_000);
   });
 
   it('sends port 0 for an empty port, so the Rust core rejects it', () => {
