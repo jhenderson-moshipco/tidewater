@@ -427,3 +427,13 @@ select.input {
     background: CanvasText;
   }
 }
+
+.serverProgress {
+  padding: 2px 10px 6px 36px;
+  color: var(--tw-text-muted);
+  font-size: var(--tw-font-size-small);
+}
+
+.elapsed {
+  font-variant-numeric: tabular-nums;
+}

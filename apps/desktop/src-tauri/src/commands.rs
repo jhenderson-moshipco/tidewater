@@ -9,9 +9,9 @@ use crate::connections::{ConnectParams, ConnectionInfo, ConnectionManager};
 use crate::error::CommandError;
 use crate::servers::model::{GroupInput, PasswordChange, ServerGroup, ServerInput, ServerListView, ServerSummary};
 use crate::servers::store::{ServerStore, StoreStatusView};
-use crate::servers::vault::OsKeychain;
+use crate::servers::vault::{AppVault, KeyStorage};
 
-pub type Store = ServerStore<OsKeychain>;
+pub type Store = ServerStore<AppVault>;
 
 #[tauri::command(async)]
 pub fn store_status(store: State<'_, Store>) -> StoreStatusView {
@@ -85,6 +85,12 @@ pub async fn connect_server(store: State<'_, Store>, connections: State<'_, Conn
     connections.connect(&id, params).await
 }
 
+/// Stops a connect to this server that is still in progress.
+#[tauri::command]
+pub fn cancel_connect(connections: State<'_, ConnectionManager>, id: String) {
+    connections.cancel(&id);
+}
+
 #[tauri::command]
 pub async fn disconnect_server(connections: State<'_, ConnectionManager>, id: String) -> Result<(), CommandError> {
     connections.disconnect(&id).await;
@@ -117,6 +123,18 @@ pub async fn catalog_children(
     nodes.map_err(CommandError::from)
 }
 
+/// Where the key for the saved servers is kept: a file only this user can read, or the system keychain.
+#[tauri::command(async)]
+pub fn key_storage(store: State<'_, Store>) -> KeyStorage {
+    store.vault().storage()
+}
+
+/// Moves the key for the saved servers to `storage`, keeping only one copy.
+#[tauri::command(async)]
+pub fn set_key_storage(store: State<'_, Store>, storage: KeyStorage) -> Result<(), CommandError> {
+    store.vault().set_storage(storage).map_err(CommandError::Storage)
+}
+
 #[cfg(test)]
 mod tests {
     use serde_json::{Value, json};
@@ -126,6 +144,7 @@ mod tests {
     use tauri::{App, WebviewWindow, WebviewWindowBuilder};
 
     use super::*;
+    use crate::servers::vault::OsKeychain;
     use crate::testing::{closed_port, mock_keychain};
 
     #[cfg(windows)]
@@ -148,7 +167,7 @@ mod tests {
     fn test_app() -> TestApp {
         mock_keychain();
         let folder = tempfile::tempdir().unwrap();
-        let store = Store::new(folder.path().join("servers.json"), OsKeychain);
+        let store = Store::new(folder.path().join("servers.json"), AppVault::new(folder.path(), Box::new(OsKeychain)));
         let mut app = crate::with_commands(mock_builder().manage(store)).build(mock_context(noop_assets())).unwrap();
         crate::manage_state(&mut app).unwrap();
         with_window(app, folder)
@@ -219,15 +238,15 @@ mod tests {
     fn requests_a_command_cant_read_are_refused_without_running_it() {
         let no_state = with_window(crate::with_commands(mock_builder()).build(mock_context(noop_assets())).unwrap(), tempfile::tempdir().unwrap());
         let folder = tempfile::tempdir().unwrap();
-        let store_only = mock_builder().manage(Store::new(folder.path().join("servers.json"), OsKeychain));
+        let store_only = mock_builder().manage(Store::new(folder.path().join("servers.json"), AppVault::new(folder.path(), Box::new(OsKeychain))));
         let store_only = with_window(crate::with_commands(store_only).build(mock_context(noop_assets())).unwrap(), folder);
         let app = test_app();
         let with_arguments = [
             "unlock_store", "save_server", "delete_server", "save_group", "delete_group", "test_connection", "connect_server",
-            "disconnect_server", "catalog_children",
+            "disconnect_server", "catalog_children", "cancel_connect", "set_key_storage",
         ];
 
-        for command in ["store_status", "start_fresh_store", "list_servers", "list_connections"].iter().chain(&with_arguments) {
+        for command in ["store_status", "start_fresh_store", "list_servers", "list_connections", "key_storage"].iter().chain(&with_arguments) {
             assert!(refusal(&no_state, command).starts_with("state not managed"), "{command}");
         }
         for command in ["delete_server", "connect_server", "catalog_children"] {
@@ -310,5 +329,22 @@ mod tests {
         assert_eq!(app.invoke("connect_server", json!({ "id": saved["id"] })).map_err(kind), Err("connection".into()));
         assert_eq!(app.invoke("disconnect_server", json!({ "id": saved["id"] })), Ok(Value::Null));
         assert_eq!(app.invoke("list_connections", json!({})), Ok(json!([])));
+    }
+
+    #[test]
+    fn the_key_is_kept_in_a_file_until_the_keychain_is_chosen_and_a_connect_can_be_cancelled() {
+        let app = test_app();
+        assert_eq!(app.invoke("key_storage", json!({})), Ok(json!("file")));
+
+        assert_eq!(app.invoke("set_key_storage", json!({ "storage": "keychain" })), Ok(Value::Null));
+        assert_eq!(app.invoke("key_storage", json!({})), Ok(json!("keychain")));
+        assert_eq!(app.invoke("cancel_connect", json!({ "id": "orders-dev" })), Ok(Value::Null));
+    }
+
+    #[test]
+    fn a_key_storage_switch_that_fails_is_a_storage_error() {
+        let app = test_app();
+        std::fs::create_dir_all(app._folder.path().join("settings.json")).unwrap();
+        assert_eq!(app.invoke("set_key_storage", json!({ "storage": "keychain" })).map_err(kind), Err("storage".into()));
     }
 }

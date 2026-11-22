@@ -4,8 +4,9 @@ use tauri::menu::{AboutMetadata, IsMenuItem, Menu, MenuEvent, MenuItem, MenuItem
 use tauri::{AppHandle, Emitter, Runtime};
 
 /// these id's get forwarded to the frontend
-const FORWARDED: [&str; 8] = [
+const FORWARDED: [&str; 9] = [
     "new_connection",
+    "open_settings",
     "view_explorer",
     "view_search",
     "view_files",
@@ -53,7 +54,7 @@ use SystemItem::*;
 const APP_MENU: &[Entry] = &[
     System(About),
     System(Separator),
-    Planned("Settings…", Some("CmdOrCtrl+,")),
+    Action("open_settings", "Settings…", Some("CmdOrCtrl+,")),
     System(Separator),
     System(Services),
     System(Separator),
@@ -67,6 +68,8 @@ const APP_MENU: &[Entry] = &[
 const FILE_MENU: &[Entry] = &[
     Planned("New Query Tab", Some("CmdOrCtrl+T")),
     Action("new_connection", "New Connection…", Some("CmdOrCtrl+Shift+N")),
+    #[cfg(not(target_os = "macos"))]
+    Action("open_settings", "Settings…", Some("CmdOrCtrl+,")),
     System(Separator),
     Planned("Open .sql File…", Some("CmdOrCtrl+O")),
     Planned("Save", Some("CmdOrCtrl+S")),
