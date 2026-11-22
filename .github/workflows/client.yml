@@ -42,7 +42,41 @@ jobs:
 
       - run: pnpm install --frozen-lockfile
 
-      - run: pnpm typecheck
+      - name: Typecheck
+        id: typecheck
+        continue-on-error: true
+        run: |
+          set -o pipefail
+          mkdir -p "$RUNNER_TEMP/report"
+          pnpm typecheck 2>&1 | tee "$RUNNER_TEMP/report/typecheck.txt"
 
       - name: Run every test and require full coverage
-        run: pnpm coverage
+        id: tests
+        continue-on-error: true
+        run: >
+          pnpm coverage
+          --reporter=default
+          --reporter=json --outputFile.json="$RUNNER_TEMP/report/tests.json"
+          --coverage.reportOnFailure
+          --coverage.reporter=text --coverage.reporter=json-summary --coverage.reporter=json
+          --coverage.reportsDirectory="$RUNNER_TEMP/report/coverage"
+
+      - name: Write the pull request comment
+        if: github.event_name == 'pull_request'
+        env:
+          TYPECHECK: ${{ steps.typecheck.outcome }}
+          TESTS: ${{ steps.tests.outcome }}
+        run: |
+          mkdir -p "$RUNNER_TEMP/comment"
+          node "$GITHUB_WORKSPACE/.github/scripts/ci-comment.mjs" client "$RUNNER_TEMP/report" > "$RUNNER_TEMP/comment/body.md"
+
+      - uses: actions/upload-artifact@v4
+        if: github.event_name == 'pull_request'
+        with:
+          name: ci-comment-client
+          path: ${{ runner.temp }}/comment
+          retention-days: 7
+
+      - name: Fail when the typecheck or a test failed, or coverage is below 100%
+        if: steps.typecheck.outcome == 'failure' || steps.tests.outcome == 'failure'
+        run: exit 1
