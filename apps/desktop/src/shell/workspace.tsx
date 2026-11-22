@@ -1,3 +1,4 @@
+import { DialogHost } from '../servers/server-dialogs';
 import { useWorkspaceStore } from '../store/workspace';
 import { ActivityBar } from './activity-bar';
 import { EditorArea } from './editor-area';
@@ -16,6 +17,7 @@ export function Workspace() {
         <EditorArea />
       </div>
       <StatusBar />
+      <DialogHost />
     </div>
   );
 }

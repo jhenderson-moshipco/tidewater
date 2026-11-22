@@ -35,7 +35,20 @@ Before writing an effect, use the table below to decide an option, if none match
 - Use native HTML elements first: `<button>`, `<dialog>` for modals, `<select>`, `<details>`. A `title` attribute is enough for a tooltip on a labelled button. Add a library only for a widget that HTML can't do accessibly, and only for that widget.
 - Style with CSS modules next to the component, using the `--tw-*` variables from `src/theme.css` for every color, so themes keep working.
 - A component takes a single typed view-model object rather than a long list of props.
-- Every control has an accessible name and works from the keyboard. Results of async actions are announced, and nothing is signalled by color alone.
+- Every component meets the accessibility rules below.
+
+## Accessibility
+
+Everything has to work from the keyboard alone and read clearly in a screen reader. A change that breaks either isn't finished.
+
+- **Reachable and named.** Every control can be reached with Tab and used with Enter or Space. Icon-only buttons have an `aria-label`, and focus is always visible.
+- **Native structure.** Use `<label>` for every input, `<fieldset>` and `<legend>` for groups of fields, headings for sections, and `<dialog>` with `showModal()` for modals so focus stays inside and Escape closes them.
+- **Focus is never lost.** Close dialogs with the dialog's own `close()` so focus returns to what opened it. When an action removes the control that had focus, call `restoreFocusIfLost()` from `src/shell/focus.ts`.
+- **Announce results.** Put a `role="status"` region in the page before its text changes, and set one short sentence in it when an async action finishes. Errors use `role="alert"`. A region that appears and changes at the same moment is often not read.
+- **Don't move focus while someone is typing.** Fill fields in place rather than re-rendering the form around them.
+- **Not by color alone.** States also differ in shape or text, and the app stays usable in Windows high-contrast mode (`forced-colors`).
+
+Check a change by using it with the keyboard only, then with VoiceOver on macOS or NVDA on Windows.
 
 ## Types from the Rust core
 
@@ -59,5 +72,13 @@ Run the typecheck before opening a pull request:
 ```bash
 pnpm typecheck
 ```
+
+Then run the tests with coverage. Every line, branch, function and statement of the client must be covered, and CI fails below 100%:
+
+```bash
+pnpm coverage
+```
+
+Tests find elements by role and accessible name, the way a screen reader does, and answer Rust commands with `mockCommands` from `src/testing/backend.ts`.
 
 When a change touches data loading or a component that renders often, open the webview's developer tools while running `pnpm dev`, record with the React profiler, and check that the number of renders didn't go up. If the render count goes up without adding significant functionlity, your PR will likely not be approved.
