@@ -79,7 +79,7 @@ fn read_file(path: &Path) -> Result<Option<StoreFile>, String> {
     Ok(Some(file))
 }
 
-fn write_private(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+pub(crate) fn write_private(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     let mut options = fs::OpenOptions::new();
     options.write(true).create(true).truncate(true);
     #[cfg(unix)]
@@ -161,11 +161,11 @@ fn initial_state(path: &Path, vault: &impl KeyVault) -> State {
         Some(file) => match vault.read() {
             KeyLookup::Found(key) => match Fernet::new(&key).and_then(|fernet| decrypt_list(&file, &fernet).map(|list| (list, fernet))) {
                 Some((list, fernet)) => State::Unlocked { list, key: Some(fernet), kdf: None },
-                None => State::Locked { reason: "The saved-server file doesn't match the key in this system's keychain".into() },
+                None => State::Locked { reason: "The saved-server file doesn't match its key".into() },
             },
-            KeyLookup::Missing => State::Locked { reason: "The key for the saved-server file isn't in this system's keychain".into() },
+            KeyLookup::Missing => State::Locked { reason: "The key for the saved-server file is missing".into() },
             KeyLookup::NoKeyring(reason) | KeyLookup::Failed(reason) => {
-                State::Locked { reason: format!("The system keychain couldn't be read: {reason}") }
+                State::Locked { reason: format!("The key for the saved-server file couldn't be read: {reason}") }
             }
         },
     }
@@ -175,6 +175,10 @@ impl<V: KeyVault> ServerStore<V> {
     /// Creates the store without touching the keychain or the file; both are read on first use.
     pub fn new(path: PathBuf, vault: V) -> Self {
         ServerStore { path, vault, state: OnceLock::new() }
+    }
+
+    pub fn vault(&self) -> &V {
+        &self.vault
     }
 
     fn lock(&self) -> MutexGuard<'_, State> {
@@ -251,7 +255,7 @@ impl<V: KeyVault> ServerStore<V> {
                 let generated = Fernet::generate_key();
                 self.vault
                     .write(&generated)
-                    .map_err(|error| CommandError::Storage(format!("Couldn't store the encryption key in the system keychain: {error}")))?;
+                    .map_err(|error| CommandError::Storage(format!("Couldn't store the encryption key: {error}")))?;
                 let fernet = Fernet::new(&generated).expect("a generated key is always valid");
                 *key = Some(fernet.clone());
                 fernet
@@ -268,50 +272,11 @@ impl<V: KeyVault> ServerStore<V> {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::atomic::Ordering;
 
     use super::*;
-    use crate::testing::parts;
+    use crate::testing::{Keychain, MemoryVault, parts};
     use crate::servers::model::{Environment, PasswordChange, ServerInput, ServerSummary, SessionDefaults, TlsMode};
-
-    #[derive(Default)]
-    enum Keychain {
-        #[default]
-        Working,
-        NoKeyring,
-        Refusing,
-    }
-
-    #[derive(Default)]
-    struct MemoryVault {
-        key: Mutex<Option<String>>,
-        keychain: Keychain,
-        reads: AtomicUsize,
-    }
-
-    impl KeyVault for MemoryVault {
-        fn read(&self) -> KeyLookup {
-            self.reads.fetch_add(1, Ordering::SeqCst);
-            match self.keychain {
-                Keychain::Working => match self.key.lock().unwrap().clone() {
-                    Some(key) => KeyLookup::Found(key),
-                    None => KeyLookup::Missing,
-                },
-                Keychain::NoKeyring => KeyLookup::NoKeyring("no secret service".into()),
-                Keychain::Refusing => KeyLookup::Failed("denied".into()),
-            }
-        }
-
-        fn write(&self, key: &str) -> Result<(), String> {
-            match self.keychain {
-                Keychain::Working => {
-                    *self.key.lock().unwrap() = Some(key.to_string());
-                    Ok(())
-                }
-                Keychain::NoKeyring | Keychain::Refusing => Err("denied".into()),
-            }
-        }
-    }
 
     fn vault_with(key: Option<String>) -> MemoryVault {
         MemoryVault { key: Mutex::new(key), ..MemoryVault::default() }
@@ -444,7 +409,7 @@ mod tests {
 
         let locked = ServerStore::new(path.clone(), vault_with(None));
 
-        assert_eq!(locked_reason(&locked), "The key for the saved-server file isn't in this system's keychain");
+        assert_eq!(locked_reason(&locked), "The key for the saved-server file is missing");
         assert!(locked.status().has_saved_file);
         let refused = CommandError::StoreLocked("Saved servers are locked".into());
         assert_eq!(try_count(&locked), Err(refused.clone()));
@@ -458,7 +423,7 @@ mod tests {
 
         let locked = ServerStore::new(path, vault_with(Some(Fernet::generate_key())));
 
-        assert_eq!(locked_reason(&locked), "The saved-server file doesn't match the key in this system's keychain");
+        assert_eq!(locked_reason(&locked), "The saved-server file doesn't match its key");
     }
 
     #[test]
@@ -467,7 +432,7 @@ mod tests {
 
         let locked = ServerStore::new(path, keychain(Keychain::Refusing));
 
-        assert_eq!(locked_reason(&locked), "The system keychain couldn't be read: denied");
+        assert_eq!(locked_reason(&locked), "The key for the saved-server file couldn't be read: denied");
     }
 
     #[test]
@@ -476,7 +441,7 @@ mod tests {
 
         let locked = ServerStore::new(path, keychain(Keychain::NoKeyring));
 
-        assert_eq!(locked_reason(&locked), "The system keychain couldn't be read: no secret service");
+        assert_eq!(locked_reason(&locked), "The key for the saved-server file couldn't be read: no secret service");
     }
 
     #[test]
@@ -487,7 +452,7 @@ mod tests {
 
         let saved = add(&store, "orders-prod");
 
-        assert_eq!(saved, Err(CommandError::Storage("Couldn't store the encryption key in the system keychain: denied".into())));
+        assert_eq!(saved, Err(CommandError::Storage("Couldn't store the encryption key: denied".into())));
         assert!(!path.exists());
         assert_eq!(server_count(&store), 0);
     }

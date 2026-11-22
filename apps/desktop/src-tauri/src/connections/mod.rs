@@ -6,6 +6,7 @@ pub mod url;
 
 use std::collections::HashMap;
 use std::error::Error as _;
+use std::sync::Arc;
 use std::time::Duration;
 
 use serde::Serialize;
@@ -129,16 +130,32 @@ struct LiveConnection {
 #[derive(Default)]
 pub struct ConnectionManager {
     live: tokio::sync::Mutex<HashMap<String, LiveConnection>>,
+    /// Wakes a server's connects in progress so they give up.
+    cancels: std::sync::Mutex<HashMap<String, Arc<tokio::sync::Notify>>>,
 }
 
 impl ConnectionManager {
+    fn cancel_signal(&self, server_id: &str) -> Arc<tokio::sync::Notify> {
+        let mut cancels = self.cancels.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        cancels.entry(server_id.to_string()).or_default().clone()
+    }
+
+    /// Stops this server's connects in progress. Connections already open stay open.
+    pub fn cancel(&self, server_id: &str) {
+        self.cancel_signal(server_id).notify_waiters();
+    }
+
     pub async fn connect(&self, server_id: &str, params: ConnectParams) -> Result<ConnectionInfo, CommandError> {
         if let Some(existing) = self.live.lock().await.get(server_id) {
             if !existing.client.is_closed() {
                 return Ok(existing.info.clone());
             }
         }
-        let (client, driver) = open(&params).await.map_err(|error| CommandError::Connection(describe(&error)))?;
+        let cancel = self.cancel_signal(server_id);
+        let (client, driver) = tokio::select! {
+            opened = open(&params) => opened.map_err(|error| CommandError::Connection(describe(&error)))?,
+            () = cancel.notified() => return Err(CommandError::Cancelled("Connecting was cancelled.".into())),
+        };
         let (server_version, encryption) = session_info(&client).await.map_err(|error| {
             driver.abort();
             CommandError::Connection(describe(&error))
@@ -218,6 +235,21 @@ mod tests {
 
         assert_eq!(refused, Err(CommandError::Connection("query failed (from the fake server)".into())));
         assert!(manager.list().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn cancelling_stops_a_connect_that_is_waiting_on_the_server() {
+        let manager = ConnectionManager::default();
+        let params = fake_server(FakeServer::Silent).await;
+
+        let (refused, ()) = tokio::join!(manager.connect("server-a", params), async {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            manager.cancel("server-a");
+        });
+
+        assert_eq!(refused, Err(CommandError::Cancelled("Connecting was cancelled.".into())));
+        assert!(manager.list().await.is_empty());
+        manager.cancel("server-b");
     }
 
     #[tokio::test]
