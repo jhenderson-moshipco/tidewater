@@ -60,11 +60,39 @@ jobs:
         with:
           workspaces: apps/desktop/src-tauri
 
-      - name: Run every test and require full coverage
-        run: >
-          cargo llvm-cov --lib
-          --ignore-filename-regex 'main\.rs'
-          --fail-under-lines 100
-          --fail-under-functions 100
-          --fail-under-regions 100
-          -- --include-ignored
+      - name: Run every test
+        id: tests
+        continue-on-error: true
+        run: |
+          set -o pipefail
+          mkdir -p "$RUNNER_TEMP/report"
+          cargo llvm-cov --lib --no-report -- --include-ignored 2>&1 | tee "$RUNNER_TEMP/report/test-output.txt"
+
+      - name: Require full coverage
+        id: coverage
+        continue-on-error: true
+        run: |
+          report="cargo llvm-cov report --ignore-filename-regex main\.rs"
+          $report --json --summary-only --output-path "$RUNNER_TEMP/report/coverage.json"
+          $report --show-missing-lines | tee "$RUNNER_TEMP/report/missing.txt"
+          $report --fail-under-lines 100 --fail-under-functions 100 --fail-under-regions 100 > /dev/null
+
+      - name: Write the pull request comment
+        if: github.event_name == 'pull_request'
+        env:
+          TESTS: ${{ steps.tests.outcome }}
+          COVERAGE: ${{ steps.coverage.outcome }}
+        run: |
+          mkdir -p "$RUNNER_TEMP/comment"
+          node "$GITHUB_WORKSPACE/.github/scripts/ci-comment.mjs" rust "$RUNNER_TEMP/report" > "$RUNNER_TEMP/comment/body.md"
+
+      - uses: actions/upload-artifact@v4
+        if: github.event_name == 'pull_request'
+        with:
+          name: ci-comment-rust
+          path: ${{ runner.temp }}/comment
+          retention-days: 7
+
+      - name: Fail when a test failed or coverage is below 100%
+        if: steps.tests.outcome == 'failure' || steps.coverage.outcome == 'failure'
+        run: exit 1
