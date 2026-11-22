@@ -65,7 +65,19 @@ Build an installer for your platform:
 pnpm build
 ```
 
-The app is an early shell: the window, menus, themes and workspace layout are in place, and connecting to a server is not built yet.
+Run the Rust core's tests:
+
+```bash
+cd apps/desktop/src-tauri && cargo test
+```
+
+A few tests connect to a real server. They're skipped unless you point them at one:
+
+```bash
+TIDEWATER_TEST_DATABASE_URL="postgres://user:password@localhost:5432/postgres" cargo test -- --ignored
+```
+
+The app is an early shell: the window, menus, themes and workspace layout are in place. The Rust core can save servers and connect to them, and the screens for that are next.
 
 ## Documentation
 

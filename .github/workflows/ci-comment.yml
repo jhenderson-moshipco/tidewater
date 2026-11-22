@@ -1,0 +1,54 @@
+name: CI comment
+
+on:
+  workflow_run:
+    workflows: [Rust, Client]
+    types: [completed]
+
+permissions:
+  actions: read
+  pull-requests: write
+
+jobs:
+  comment:
+    name: Post the report on the pull request
+    if: github.event.workflow_run.event == 'pull_request' && github.event.workflow_run.conclusion != 'cancelled'
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Download the report
+        id: report
+        continue-on-error: true
+        uses: actions/download-artifact@v4
+        with:
+          pattern: ci-comment-*
+          merge-multiple: true
+          path: report
+          run-id: ${{ github.event.workflow_run.id }}
+          github-token: ${{ github.token }}
+
+      - name: Post or update the comment
+        if: steps.report.outcome == 'success'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
+          WORKFLOW: ${{ github.event.workflow_run.name }}
+          RUN_URL: ${{ github.event.workflow_run.html_url }}
+        run: |
+          pr=$(gh api --paginate "repos/$REPO/pulls?state=open&per_page=100" --jq ".[] | select(.head.sha == \"$HEAD_SHA\") | .number" | head -n 1)
+          if [ -z "$pr" ]; then
+            echo "No open pull request has $HEAD_SHA as its head"
+            exit 0
+          fi
+          marker="<!-- tidewater-ci:$WORKFLOW -->"
+          {
+            echo "$marker"
+            head -c 60000 report/body.md
+            printf '\n\n[Run details](%s)\n' "$RUN_URL"
+          } > comment.md
+          existing=$(gh api --paginate "repos/$REPO/issues/$pr/comments" --jq ".[] | select(.user.login == \"github-actions[bot]\" and (.body | startswith(\"$marker\"))) | .id" | head -n 1)
+          if [ -n "$existing" ]; then
+            gh api --method PATCH "repos/$REPO/issues/comments/$existing" -F body=@comment.md > /dev/null
+          else
+            gh api --method POST "repos/$REPO/issues/$pr/comments" -F body=@comment.md > /dev/null
+          fi
