@@ -1,6 +1,7 @@
 //! Helpers shared by the unit tests.
 
-use std::sync::Once;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Mutex, Once};
 
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
@@ -9,6 +10,7 @@ use crate::connections::ConnectParams;
 use crate::connections::url::parse_connection_string;
 use crate::error::CommandError;
 use crate::servers::model::{SessionDefaults, TlsMode};
+use crate::servers::vault::{KeyLookup, KeyVault};
 
 /// Points every keyring entry at the in-memory mock, so no test reads the real system keychain.
 pub fn mock_keychain() {
@@ -57,6 +59,8 @@ pub enum FakeServer {
     RejectStartup(&'static str),
     /// Signs the client in, then fails its first query.
     FailFirstQuery,
+    /// Reads the startup message and never answers.
+    Silent,
 }
 
 fn message(tag: u8, body: &[u8]) -> Vec<u8> {
@@ -98,6 +102,7 @@ async fn answer(mut socket: TcpStream, behaviour: FakeServer) {
             failed.extend(message(b'Z', b"I"));
             failed
         }
+        FakeServer::Silent => Vec::new(),
     };
     socket.write_all(&reply).await.unwrap();
     let _ = socket.read(&mut [0u8; 1024]).await;
@@ -120,4 +125,66 @@ pub async fn fake_server(behaviour: FakeServer) -> ConnectParams {
 pub fn parts(error: CommandError) -> (String, String) {
     let value = serde_json::to_value(error).unwrap();
     (value["kind"].as_str().unwrap().to_string(), value["message"].as_str().unwrap().to_string())
+}
+
+#[derive(Default)]
+pub enum Keychain {
+    #[default]
+    Working,
+    NoKeyring,
+    Refusing,
+    /// Reads and writes, but refuses to delete.
+    Sticky,
+}
+
+/// A keychain in memory that counts its reads.
+#[derive(Default)]
+pub struct MemoryVault {
+    pub key: Mutex<Option<String>>,
+    pub keychain: Keychain,
+    pub reads: AtomicUsize,
+}
+
+impl MemoryVault {
+    pub fn reads(&self) -> usize {
+        self.reads.load(Ordering::SeqCst)
+    }
+
+    pub fn key(&self) -> Option<String> {
+        self.key.lock().unwrap().clone()
+    }
+}
+
+impl KeyVault for MemoryVault {
+    fn read(&self) -> KeyLookup {
+        self.reads.fetch_add(1, Ordering::SeqCst);
+        match self.keychain {
+            Keychain::Working | Keychain::Sticky => match self.key() {
+                Some(key) => KeyLookup::Found(key),
+                None => KeyLookup::Missing,
+            },
+            Keychain::NoKeyring => KeyLookup::NoKeyring("no secret service".into()),
+            Keychain::Refusing => KeyLookup::Failed("denied".into()),
+        }
+    }
+
+    fn write(&self, key: &str) -> Result<(), String> {
+        match self.keychain {
+            Keychain::Working | Keychain::Sticky => {
+                *self.key.lock().unwrap() = Some(key.to_string());
+                Ok(())
+            }
+            Keychain::NoKeyring | Keychain::Refusing => Err("denied".into()),
+        }
+    }
+
+    fn remove(&self) -> Result<(), String> {
+        match self.keychain {
+            Keychain::Working => {
+                *self.key.lock().unwrap() = None;
+                Ok(())
+            }
+            Keychain::NoKeyring | Keychain::Refusing | Keychain::Sticky => Err("denied".into()),
+        }
+    }
 }
