@@ -18,6 +18,11 @@
   --tw-env-staging-bg: #172636;
   --tw-env-prod: #e9b04f;
   --tw-env-prod-bg: #33280f;
+  --tw-syntax-keyword: #4fc1b5;
+  --tw-syntax-string: #e9b04f;
+  --tw-syntax-function: #c3a6f5;
+  --tw-syntax-number: #6ca8f0;
+  --tw-syntax-comment: #93a3b3;
   --tw-select-chevron: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%2393a3b3' stroke-width='2.5' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M6 9l6 6 6-6'/%3E%3C/svg%3E");
   --tw-check-mark: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%230b1218' stroke-width='3.5' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M5 12l5 5L20 7'/%3E%3C/svg%3E");
 
@@ -49,6 +54,11 @@
     --tw-env-staging-bg: #dce8f7;
     --tw-env-prod: #8a5a00;
     --tw-env-prod-bg: #f7ebd3;
+    --tw-syntax-keyword: #0e7c72;
+    --tw-syntax-string: #8a5a00;
+    --tw-syntax-function: #6b3fb5;
+    --tw-syntax-number: #1f5fad;
+    --tw-syntax-comment: #52606e;
     --tw-select-chevron: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%2352606e' stroke-width='2.5' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M6 9l6 6 6-6'/%3E%3C/svg%3E");
     --tw-check-mark: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23ffffff' stroke-width='3.5' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M5 12l5 5L20 7'/%3E%3C/svg%3E");
   }
@@ -74,6 +84,11 @@
   --tw-env-staging-bg: #dce8f7;
   --tw-env-prod: #8a5a00;
   --tw-env-prod-bg: #f7ebd3;
+  --tw-syntax-keyword: #0e7c72;
+  --tw-syntax-string: #8a5a00;
+  --tw-syntax-function: #6b3fb5;
+  --tw-syntax-number: #1f5fad;
+  --tw-syntax-comment: #52606e;
   --tw-select-chevron: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%2352606e' stroke-width='2.5' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M6 9l6 6 6-6'/%3E%3C/svg%3E");
   --tw-check-mark: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23ffffff' stroke-width='3.5' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M5 12l5 5L20 7'/%3E%3C/svg%3E");
 }

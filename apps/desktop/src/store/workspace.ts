@@ -4,6 +4,7 @@ import { createJSONStorage, persist } from 'zustand/middleware';
 export type WorkspaceView = 'explorer' | 'search' | 'files' | 'history' | 'performance';
 
 export const sidebar_widths = { min: 200, max: 640, initial: 272 } as const;
+export const results_heights = { min: 120, max: 800, initial: 320 } as const;
 
 type WorkspaceState = {
   active_view: WorkspaceView;
@@ -15,10 +16,16 @@ type WorkspaceState = {
   showView: (view: WorkspaceView) => void;
   toggleSidebar: () => void;
   setSidebarWidth: (width: number) => void;
+  results_height: number;
+  setResultsHeight: (height: number) => void;
 };
 
 export function clampSidebarWidth(width: number): number {
   return Math.min(sidebar_widths.max, Math.max(sidebar_widths.min, Math.round(width)));
+}
+
+export function clampResultsHeight(height: number): number {
+  return Math.min(results_heights.max, Math.max(results_heights.min, Math.round(height)));
 }
 
 export const useWorkspaceStore = create<WorkspaceState>()(
@@ -35,11 +42,13 @@ export const useWorkspaceStore = create<WorkspaceState>()(
       showView: (view) => set({ active_view: view, sidebar_open: true }),
       toggleSidebar: () => set((state) => ({ sidebar_open: !state.sidebar_open })),
       setSidebarWidth: (width) => set({ sidebar_width: clampSidebarWidth(width) }),
+      results_height: results_heights.initial,
+      setResultsHeight: (height) => set({ results_height: clampResultsHeight(height) }),
     }),
     {
       name: 'tidewater-workspace',
       storage: createJSONStorage(() => localStorage),
-      partialize: (state) => ({ sidebar_width: state.sidebar_width }),
+      partialize: (state) => ({ sidebar_width: state.sidebar_width, results_height: state.results_height }),
     },
   ),
 );

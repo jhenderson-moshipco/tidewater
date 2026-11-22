@@ -22,7 +22,9 @@ export type OpenDialog =
   | { kind: 'group'; editing: ServerGroup | null }
   | { kind: 'delete-server'; server: ServerSummary }
   | { kind: 'delete-group'; group: ServerGroup; server_count: number }
-  | { kind: 'start-fresh' };
+  | { kind: 'start-fresh' }
+  | { kind: 'pick-connection'; tab_id: string; then_run: 'statement' | 'all' | null }
+  | { kind: 'close-tab'; tab_id: string; title: string; transaction: 'open' | 'failed' };
 
 type DialogState = {
   open: OpenDialog | null;

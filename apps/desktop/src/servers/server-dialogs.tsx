@@ -5,6 +5,8 @@ import { useDialogStore } from '../store/dialogs';
 import { useServerStore } from '../store/servers';
 import { useTreeStore } from '../store/tree';
 import { fieldText } from '../utils/forms';
+import { ConnectionPicker } from '../query/connection-picker';
+import { useQueryTabStore } from '../store/query-tabs';
 import { ConnectionDialog } from './connection-dialog';
 import { Modal, closeDialogOf } from './modal';
 import classes from './servers.module.css';
@@ -112,6 +114,15 @@ function deleteGroupModel(group: ServerGroup, server_count: number) {
   };
 }
 
+function closeTabModel(tab_id: string, title: string, transaction: 'open' | 'failed') {
+  return {
+    title: `Close ${title}?`,
+    message: transaction === 'open' ? 'Its open transaction is rolled back.' : 'Its failed transaction is rolled back.',
+    confirm_label: 'Roll back and close',
+    action: async () => useQueryTabStore.getState().closeTab(tab_id),
+  };
+}
+
 const start_fresh_model = {
   title: 'Start with no saved servers?',
   message: 'The locked file is kept next to the new one, renamed with the date, in case its key turns up.',
@@ -134,5 +145,9 @@ export function DialogHost() {
       return <ConfirmDialog model={deleteGroupModel(open.group, open.server_count)} />;
     case 'start-fresh':
       return <ConfirmDialog model={start_fresh_model} />;
+    case 'pick-connection':
+      return <ConnectionPicker model={{ tab_id: open.tab_id, then_run: open.then_run }} />;
+    case 'close-tab':
+      return <ConfirmDialog model={closeTabModel(open.tab_id, open.title, open.transaction)} />;
   }
 }
