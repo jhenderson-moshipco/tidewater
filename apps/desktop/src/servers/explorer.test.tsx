@@ -1,5 +1,5 @@
-import { act, screen, within } from '@testing-library/react';
-import { describe, expect, it } from 'vitest';
+import { act, fireEvent, screen, within } from '@testing-library/react';
+import { describe, expect, it, vi } from 'vitest';
 import { useDialogStore } from '../store/dialogs';
 import { useServerStore } from '../store/servers';
 import { commandsOf, failWith, group, mockCommands, server, unlocked } from '../testing/backend';
@@ -133,10 +133,33 @@ describe('the explorer', () => {
     expect(screen.getByText(', not connected')).toBeTruthy();
   });
 
-  it('disables the button while a server is connecting', () => {
-    useServerStore.setState({ store: unlocked, servers: [server()], connections: { 'orders-dev': { status: 'connecting' } } });
-    renderWithUser(<Explorer />);
-    expect((screen.getByRole('button', { name: 'Disconnect orders-dev' }) as HTMLButtonElement).disabled).toBe(true);
+  it('counts the seconds while a server connects, and offers Cancel instead of Connect', async () => {
+    vi.useFakeTimers({ toFake: ['Date', 'setInterval', 'clearInterval'] });
+    vi.setSystemTime(10_000);
+    useServerStore.setState({ store: unlocked, servers: [server()], connections: { 'orders-dev': { status: 'connecting', started: 7_000 } } });
+    const calls = mockCommands({ cancel_connect: () => null });
+    const { unmount } = renderWithUser(<Explorer />);
+    const progress = () => screen.getByText('Connecting…', { exact: false }).textContent;
+
+    expect(progress()).toBe('Connecting… 3 s');
+    act(() => vi.advanceTimersByTime(2_000));
+    expect(progress()).toBe('Connecting… 5 s');
+    fireEvent.click(screen.getByRole('button', { name: 'Cancel connecting to orders-dev' }));
+    unmount();
+    vi.useRealTimers();
+
+    expect(screen.queryByRole('button', { name: 'Connect orders-dev' })).toBeNull();
+    expect(calls).toEqual([{ command: 'cancel_connect', args: { id: 'orders-dev' } }]);
+  });
+
+  it('announces the outcome of a connect in its status region', async () => {
+    useServerStore.setState({ store: unlocked, servers: [server()] });
+    mockCommands({ connect_server: () => info });
+    const { user } = renderWithUser(<Explorer />);
+
+    await user.click(screen.getByRole('button', { name: 'Connect orders-dev' }));
+
+    expect(await screen.findByText('Connected to orders-dev.')).toBeTruthy();
   });
 });
 

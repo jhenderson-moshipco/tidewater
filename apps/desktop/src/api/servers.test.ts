@@ -17,7 +17,10 @@ const commands: Array<[string, () => Promise<unknown>, InvokeArgs]> = [
   ['parse_connection', () => api.parseConnection('postgres://h/db'), { input: 'postgres://h/db' }],
   ['test_connection', () => api.testConnection(input), { input }],
   ['connect_server', () => api.connectServer('orders-dev'), { id: 'orders-dev' }],
+  ['cancel_connect', () => api.cancelConnect('orders-dev'), { id: 'orders-dev' }],
   ['disconnect_server', () => api.disconnectServer('orders-dev'), { id: 'orders-dev' }],
+  ['key_storage', () => api.keyStorage(), {}],
+  ['set_key_storage', () => api.setKeyStorage('keychain'), { storage: 'keychain' }],
   ['list_connections', () => api.listConnections(), {}],
 ];
 

@@ -28,7 +28,7 @@ describe('the workspace', () => {
     const status = () => screen.getByRole('status').textContent;
     expect(status()).toBe('No connection');
 
-    act(() => useServerStore.setState({ connections: { a: { status: 'connected', info }, b: { status: 'connecting' } } }));
+    act(() => useServerStore.setState({ connections: { a: { status: 'connected', info }, b: { status: 'connecting', started: 0 } } }));
     expect(status()).toBe('1 connection');
 
     act(() => useServerStore.setState({ connections: { a: { status: 'connected', info }, b: { status: 'connected', info } } }));

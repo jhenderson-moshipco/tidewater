@@ -7,6 +7,7 @@ import {
   IconPlayerStop,
   IconPlus,
   IconTrash,
+  IconX,
 } from '@tabler/icons-react';
 import type { ServerGroup, ServerSummary } from '../generated/servers';
 import { useDialogStore } from '../store/dialogs';
@@ -23,6 +24,19 @@ const state_labels = {
   failed: 'connection failed',
 } as const;
 
+/** Seconds since `started`, written straight into the element each second so the row never re-renders for it. */
+function Elapsed({ started }: { started: number }) {
+  const tick = (element: HTMLSpanElement) => {
+    const show = () => {
+      element.textContent = `${Math.floor((Date.now() - started) / 1000)} s`;
+    };
+    show();
+    const timer = window.setInterval(show, 1000);
+    return () => window.clearInterval(timer);
+  };
+  return <span ref={tick} aria-hidden="true" className={classes.elapsed} />;
+}
+
 function ServerRow({ model }: { model: { server: ServerSummary; grouped: boolean } }) {
   const { server, grouped } = model;
   const connection: ConnectionState | undefined = useServerStore((state) => state.connections[server.id]);
@@ -36,7 +50,11 @@ function ServerRow({ model }: { model: { server: ServerSummary; grouped: boolean
   return (
     <li>
       <div className={classes.server} data-grouped={grouped}>
-        <span aria-hidden className={classes.dot} data-state={state} />
+        {connection?.status === 'connecting' ? (
+          <span aria-hidden="true" className="spinner" />
+        ) : (
+          <span aria-hidden className={classes.dot} data-state={state} />
+        )}
         <span className={classes.serverName}>
           {server.name}
           <span className="visually-hidden">, {state_labels[state]}</span>
@@ -44,16 +62,27 @@ function ServerRow({ model }: { model: { server: ServerSummary; grouped: boolean
         <span className={classes.badge} data-environment={server.environment}>
           {environmentLabel(server.environment)}
         </span>
-        <button
-          type="button"
-          className={classes.iconButton}
-          aria-label={`${live ? 'Disconnect' : 'Connect'} ${server.name}`}
-          title={live ? 'Disconnect' : 'Connect'}
-          disabled={state === 'connecting'}
-          onClick={toggle}
-        >
-          {live ? <IconPlayerStop size={14} aria-hidden /> : <IconPlayerPlay size={14} aria-hidden />}
-        </button>
+        {connection?.status === 'connecting' ? (
+          <button
+            type="button"
+            className={classes.iconButton}
+            aria-label={`Cancel connecting to ${server.name}`}
+            title="Cancel"
+            onClick={() => void useServerStore.getState().cancelConnect(server.id)}
+          >
+            <IconX size={14} aria-hidden />
+          </button>
+        ) : (
+          <button
+            type="button"
+            className={classes.iconButton}
+            aria-label={`${live ? 'Disconnect' : 'Connect'} ${server.name}`}
+            title={live ? 'Disconnect' : 'Connect'}
+            onClick={toggle}
+          >
+            {live ? <IconPlayerStop size={14} aria-hidden /> : <IconPlayerPlay size={14} aria-hidden />}
+          </button>
+        )}
         <button
           type="button"
           className={classes.iconButton}
@@ -73,6 +102,11 @@ function ServerRow({ model }: { model: { server: ServerSummary; grouped: boolean
           <IconTrash size={14} aria-hidden />
         </button>
       </div>
+      {connection?.status === 'connecting' && (
+        <p className={classes.serverProgress}>
+          Connecting… <Elapsed started={connection.started} />
+        </p>
+      )}
       {connection?.status === 'failed' && (
         <p role="alert" className={classes.serverError}>
           {connection.message}
@@ -163,6 +197,15 @@ export function ExplorerActions() {
   );
 }
 
+function ExplorerStatus() {
+  const announcement = useServerStore((state) => state.announcement);
+  return (
+    <p role="status" className="visually-hidden">
+      {announcement}
+    </p>
+  );
+}
+
 export function Explorer() {
   const status = useServerStore((state) => state.store?.status);
   const groups = useServerStore((state) => state.groups);
@@ -187,6 +230,7 @@ export function Explorer() {
 
   return (
     <div className={classes.explorer}>
+      <ExplorerStatus />
       <ul aria-label="Servers" className={classes.list}>
         {groups.map((group) => (
           <GroupSection key={group.id} model={{ group, servers: servers.filter((server) => server.group_id === group.id) }} />

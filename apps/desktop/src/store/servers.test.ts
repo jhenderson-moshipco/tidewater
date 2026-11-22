@@ -7,9 +7,9 @@ const empty_list = { groups: [], servers: [] };
 const info = { server_id: 'orders-dev', server_version: '17.2', encryption: 'TLSv1.3' };
 
 describe('the server store', () => {
-  it('loads nothing outside the Tauri app', async () => {
+  it('loads nothing outside the Tauri app, and still finishes booting', async () => {
     await state().load();
-    expect(state().store).toBeNull();
+    expect([state().store, state().booted]).toEqual([null, true]);
   });
 
   it('loads the saved servers once the store is unlocked', async () => {
@@ -99,13 +99,40 @@ describe('the server store', () => {
     mockCommands({ connect_server: () => answers.shift()?.() });
 
     const connecting = state().connect('orders-dev');
-    expect(state().connections['orders-dev']).toEqual({ status: 'connecting' });
+    expect(state().connections['orders-dev']).toEqual({ status: 'connecting', started: expect.any(Number) });
     pending.resolve(info);
     await connecting;
     expect(state().connections['orders-dev']).toEqual({ status: 'connected', info });
 
     await state().connect('orders-dev');
     expect(state().connections['orders-dev']).toEqual({ status: 'failed', message: 'password authentication failed' });
+  });
+
+  it('announces a connect that succeeded, naming the server, or the server when it is gone', async () => {
+    useServerStore.setState({ servers: [server()] });
+    mockCommands({ connect_server: () => info });
+
+    await state().connect('orders-dev');
+    expect(state().announcement).toBe('Connected to orders-dev.');
+    await state().connect('deleted');
+    expect(state().announcement).toBe('Connected to the server.');
+  });
+
+  it('a cancelled connect leaves the server not connected and says so', async () => {
+    useServerStore.setState({ servers: [server()] });
+    const calls = mockCommands({ connect_server: () => failWith('cancelled', 'Connecting was cancelled.'), cancel_connect: () => null });
+
+    await state().cancelConnect('orders-dev');
+    await state().connect('orders-dev');
+
+    expect([state().connections, state().announcement]).toEqual([{}, 'Stopped connecting to orders-dev.']);
+    expect(calls[0]).toEqual({ command: 'cancel_connect', args: { id: 'orders-dev' } });
+  });
+
+  it('finishes booting once the startup load is done, even when it fails', async () => {
+    mockCommands({ store_status: () => failWith('storage', 'unreadable') });
+    await expect(state().load()).rejects.toEqual({ kind: 'storage', message: 'unreadable' });
+    expect(state().booted).toBe(true);
   });
 
   it('disconnecting forgets the session', async () => {

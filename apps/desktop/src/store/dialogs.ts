@@ -22,7 +22,8 @@ export type OpenDialog =
   | { kind: 'group'; editing: ServerGroup | null }
   | { kind: 'delete-server'; server: ServerSummary }
   | { kind: 'delete-group'; group: ServerGroup; server_count: number }
-  | { kind: 'start-fresh' };
+  | { kind: 'start-fresh' }
+  | { kind: 'settings' };
 
 type DialogState = {
   open: OpenDialog | null;

@@ -4,6 +4,7 @@ import { afterEach } from 'vitest';
 import { useDialogStore } from '../store/dialogs';
 import { useExplorerStore } from '../store/explorer';
 import { useServerStore } from '../store/servers';
+import { useSettingsStore } from '../store/settings';
 import { useWorkspaceStore } from '../store/workspace';
 
 afterEach(() => {
@@ -14,5 +15,6 @@ afterEach(() => {
   useDialogStore.setState(useDialogStore.getInitialState(), true);
   useExplorerStore.setState(useExplorerStore.getInitialState(), true);
   useServerStore.setState(useServerStore.getInitialState(), true);
+  useSettingsStore.setState(useSettingsStore.getInitialState(), true);
   useWorkspaceStore.setState(useWorkspaceStore.getInitialState(), true);
 });
