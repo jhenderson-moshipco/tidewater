@@ -1,6 +1,7 @@
 import type { ParsedConnection, ProbeStep, StepOutcome } from '../generated/connections';
 import type { Environment, PasswordChange, ServerInput, ServerSummary, TlsMode } from '../generated/servers';
 import type { ConnectionDraft } from '../store/dialogs';
+import { fieldText } from '../utils/forms';
 
 export const environments: ReadonlyArray<{ value: Environment; label: string }> = [
   { value: 'dev', label: 'DEV' },
@@ -48,7 +49,7 @@ function wholeNumber(value: string): number | '' {
 /** Reads the form's current values, so a pasted URL can be merged without losing what was typed. */
 export function readDraft(form: HTMLFormElement): ConnectionDraft {
   const data = new FormData(form);
-  const text = (name: string) => String(data.get(name) ?? '');
+  const text = (name: string) => fieldText(data, name);
   return {
     url: text('url'),
     name: text('name'),

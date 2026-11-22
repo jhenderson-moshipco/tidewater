@@ -6,6 +6,7 @@ import type { ProbeResult } from '../generated/connections';
 import type { ServerSummary } from '../generated/servers';
 import { useDialogStore } from '../store/dialogs';
 import { useServerStore } from '../store/servers';
+import { formOf, inputOf } from '../utils/forms';
 import {
   applyParsed,
   environments,
@@ -32,9 +33,9 @@ function statusText(busy: 'testing' | 'saving' | null, probe: Array<ProbeResult>
 }
 
 async function fillFromUrl(input: HTMLInputElement, text: string): Promise<void> {
-  const form = input.form;
+  const form = formOf(input);
   const dialogs = useDialogStore.getState();
-  if (!form || text.trim() === '' || input.dataset.parsed === text) return;
+  if (text.trim() === '' || input.dataset.parsed === text) return;
   input.dataset.parsed = text;
   try {
     const filled = applyParsed(form, await api.parseConnection(text));
@@ -55,17 +56,15 @@ function blurUrl(event: FocusEvent<HTMLInputElement>): void {
 
 /** Production servers start read-only with a 15 second statement timeout; the user can still change both. */
 function changeEnvironment(event: ChangeEvent<HTMLInputElement>): void {
-  const form = event.currentTarget.form;
-  if (!form || event.currentTarget.value !== 'prod') return;
-  const read_only = form.elements.namedItem('read_only');
-  const timeout = form.elements.namedItem('statement_timeout_s');
-  if (read_only instanceof HTMLInputElement) read_only.checked = true;
-  if (timeout instanceof HTMLInputElement && timeout.value === '') timeout.value = '15';
+  const form = formOf(event.currentTarget);
+  if (event.currentTarget.value !== 'prod') return;
+  inputOf(form, 'read_only').checked = true;
+  const timeout = inputOf(form, 'statement_timeout_s');
+  if (timeout.value === '') timeout.value = '15';
 }
 
 async function runTest(event: MouseEvent<HTMLButtonElement>, editing: ServerSummary | null): Promise<void> {
-  const form = event.currentTarget.form;
-  if (!form) return;
+  const form = formOf(event.currentTarget);
   const dialogs = useDialogStore.getState();
   dialogs.setBusy('testing');
   dialogs.setError(null);

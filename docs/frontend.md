@@ -73,4 +73,12 @@ Run the typecheck before opening a pull request:
 pnpm typecheck
 ```
 
+Then run the tests with coverage. Every line, branch, function and statement of the client must be covered, and CI fails below 100%:
+
+```bash
+pnpm coverage
+```
+
+Tests find elements by role and accessible name, the way a screen reader does, and answer Rust commands with `mockCommands` from `src/testing/backend.ts`.
+
 When a change touches data loading or a component that renders often, open the webview's developer tools while running `pnpm dev`, record with the React profiler, and check that the number of renders didn't go up. If the render count goes up without adding significant functionlity, your PR will likely not be approved.

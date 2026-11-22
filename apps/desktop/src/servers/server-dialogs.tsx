@@ -3,6 +3,7 @@ import { messageOf } from '../api/errors';
 import type { ServerGroup, ServerSummary } from '../generated/servers';
 import { useDialogStore } from '../store/dialogs';
 import { useServerStore } from '../store/servers';
+import { fieldText } from '../utils/forms';
 import { ConnectionDialog } from './connection-dialog';
 import { Modal, closeDialogOf } from './modal';
 import classes from './servers.module.css';
@@ -51,7 +52,7 @@ function GroupDialog({ editing }: { editing: ServerGroup | null }) {
   const submit = (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     const form = event.currentTarget;
-    const name = String(new FormData(form).get('name') ?? '');
+    const name = fieldText(new FormData(form), 'name');
     void runAndClose(form, () => useServerStore.getState().saveGroup({ id: editing?.id ?? null, name }));
   };
 

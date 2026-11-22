@@ -4,6 +4,7 @@ import { messageOf } from '../api/errors';
 import { restoreFocusIfLost } from '../shell/focus';
 import { useDialogStore } from '../store/dialogs';
 import { useServerStore } from '../store/servers';
+import { fieldText } from '../utils/forms';
 import classes from './servers.module.css';
 
 export function LockedPanel() {
@@ -26,12 +27,12 @@ export function LockedPanel() {
 type Attempt = { busy: boolean; error: string | null };
 
 export function PassphrasePanel() {
-  const has_saved_file = useServerStore((state) => state.store?.has_saved_file ?? false);
+  const has_saved_file = useServerStore((state) => state.store?.has_saved_file === true);
   const [attempt, setAttempt] = useState<Attempt>({ busy: false, error: null });
 
   const submit = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
-    const passphrase = String(new FormData(event.currentTarget).get('passphrase') ?? '');
+    const passphrase = fieldText(new FormData(event.currentTarget), 'passphrase');
     setAttempt({ busy: true, error: null });
     try {
       await useServerStore.getState().unlock(passphrase);

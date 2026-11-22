@@ -1,0 +1,48 @@
+name: Client
+
+on:
+  pull_request:
+    paths:
+      - "apps/desktop/**"
+      - "!apps/desktop/src-tauri/**"
+      - "package.json"
+      - "pnpm-lock.yaml"
+      - "pnpm-workspace.yaml"
+      - ".github/workflows/client.yml"
+  push:
+    branches: [main]
+    paths:
+      - "apps/desktop/**"
+      - "!apps/desktop/src-tauri/**"
+      - "package.json"
+      - "pnpm-lock.yaml"
+      - "pnpm-workspace.yaml"
+      - ".github/workflows/client.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: client-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  coverage:
+    name: Typecheck, tests and coverage
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: pnpm/action-setup@v4
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 24
+          cache: pnpm
+
+      - run: pnpm install --frozen-lockfile
+
+      - run: pnpm typecheck
+
+      - name: Run every test and require full coverage
+        run: pnpm coverage

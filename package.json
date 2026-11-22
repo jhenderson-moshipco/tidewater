@@ -9,6 +9,8 @@
   "scripts": {
     "dev": "pnpm --filter @tidewater/desktop tauri dev",
     "build": "pnpm --filter @tidewater/desktop tauri build",
-    "typecheck": "pnpm --filter @tidewater/desktop typecheck"
+    "typecheck": "pnpm --filter @tidewater/desktop typecheck",
+    "test": "pnpm --filter @tidewater/desktop test",
+    "coverage": "pnpm --filter @tidewater/desktop coverage"
   }
 }
