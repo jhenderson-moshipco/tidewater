@@ -47,6 +47,16 @@ describe('expanding a server', () => {
     expect(tree().announcement).toBe('password authentication failed');
   });
 
+  it('collapses a server whose connect was cancelled, says so and loads nothing', async () => {
+    useServerStore.setState({ servers: [server()] });
+    const calls = mockCommands({ connect_server: () => failWith('cancelled', 'Connecting was cancelled.') });
+
+    await tree().expandRow(rowWithId(server_row));
+
+    expect(commandsOf(calls)).toEqual(['connect_server']);
+    expect([tree().expanded, tree().announcement]).toEqual([{}, 'Stopped connecting to orders-dev']);
+  });
+
   it('loads nothing again for a connected server whose databases are loaded', async () => {
     connected();
     useTreeStore.setState({ children: { [childrenKey('orders-dev')]: { status: 'loaded', path: null, nodes: databases } } });

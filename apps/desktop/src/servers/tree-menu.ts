@@ -38,11 +38,16 @@ export function rowMenu(row: TreeRow, rows: ReadonlyArray<TreeRow>): Array<MenuE
         { text: 'Delete Group…', action: () => dialogs.show({ kind: 'delete-group', group: item.group, server_count: item.server_count }) },
       ];
     case 'server': {
-      const connected = item.connection?.status === 'connected';
+      const status = item.connection?.status;
+      const connected = status === 'connected';
+      const first: MenuEntry =
+        status === 'connecting'
+          ? { text: 'Cancel Connecting', action: () => void useServerStore.getState().cancelConnect(item.server.id) }
+          : connected
+            ? { text: 'Disconnect', action: () => void disconnectServer(item.server.id, item.server.name) }
+            : { text: 'Connect', action: () => void tree.expandRow(row) };
       return [
-        connected
-          ? { text: 'Disconnect', action: () => void disconnectServer(item.server.id, item.server.name) }
-          : { text: 'Connect', action: () => void tree.expandRow(row) },
+        first,
         { text: 'Edit…', action: () => useDialogStore.getState().openConnection(item.server) },
         { text: 'Delete…', action: () => dialogs.show({ kind: 'delete-server', server: item.server }) },
         'separator',

@@ -15,7 +15,7 @@ describe('menu commands', () => {
   });
 
   it('switch views, toggle the sidebar and open a new connection', async () => {
-    mockCommands({});
+    mockCommands({ key_storage: () => 'file' });
     listenToMenuCommands();
     await vi.waitFor(async () => {
       await emit('menu', 'view_search');
@@ -32,6 +32,8 @@ describe('menu commands', () => {
     expect(useDialogStore.getState().open).toEqual({ kind: 'connection', editing: null });
     await emit('menu', 'toggle_system_objects');
     expect(useTreeStore.getState().show_system).toBe(true);
+    await emit('menu', 'open_settings');
+    expect(useDialogStore.getState().open).toEqual({ kind: 'settings' });
   });
 
   it('open a query tab, and run or cancel on the active tab only when there is one', async () => {

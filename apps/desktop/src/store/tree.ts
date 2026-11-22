@@ -56,11 +56,18 @@ export const useTreeStore = create<TreeState>()(
         if (servers.connections[server_id]?.status !== 'connected') {
           await servers.connect(server_id);
           const connection = useServerStore.getState().connections[server_id];
+          const name = useServerStore.getState().servers.find((server) => server.id === server_id)?.name ?? 'server';
           if (connection?.status === 'failed') {
             set({ announcement: connection.message });
             return;
           }
-          const name = useServerStore.getState().servers.find((server) => server.id === server_id)?.name ?? 'server';
+          if (connection?.status !== 'connected') {
+            set((state) => ({
+              expanded: without(state.expanded, (key) => key === serverRowId(server_id)),
+              announcement: `Stopped connecting to ${name}`,
+            }));
+            return;
+          }
           set({ announcement: `Connected to ${name}` });
         }
         if (get().children[childrenKey(server_id)]?.status !== 'loaded') {

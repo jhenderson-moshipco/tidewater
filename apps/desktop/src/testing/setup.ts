@@ -6,6 +6,7 @@ import { useExplorerStore } from '../store/explorer';
 import { useQueryTabStore } from '../store/query-tabs';
 import { useServerStore } from '../store/servers';
 import { useTreeStore } from '../store/tree';
+import { useSettingsStore } from '../store/settings';
 import { useWorkspaceStore } from '../store/workspace';
 
 afterEach(() => {
@@ -17,6 +18,7 @@ afterEach(() => {
   useDialogStore.setState(useDialogStore.getInitialState(), true);
   useExplorerStore.setState(useExplorerStore.getInitialState(), true);
   useServerStore.setState(useServerStore.getInitialState(), true);
+  useSettingsStore.setState(useSettingsStore.getInitialState(), true);
   useWorkspaceStore.setState(useWorkspaceStore.getInitialState(), true);
   useTreeStore.setState(useTreeStore.getInitialState(), true);
   useQueryTabStore.setState(useQueryTabStore.getInitialState(), true);

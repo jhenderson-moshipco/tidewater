@@ -1,13 +1,13 @@
 import { isTauri } from '@tauri-apps/api/core';
 import { create } from 'zustand';
 import * as api from '../api/servers';
-import { messageOf } from '../api/errors';
+import { isCommandError, messageOf } from '../api/errors';
 import type { ConnectionInfo } from '../generated/connections';
 import type { GroupInput, ServerGroup, ServerInput, ServerSummary } from '../generated/servers';
 import type { StoreStatusView } from '../generated/store';
 
 export type ConnectionState =
-  | { status: 'connecting' }
+  | { status: 'connecting'; started: number }
   | { status: 'connected'; info: ConnectionInfo }
   | { status: 'failed'; message: string };
 
@@ -16,6 +16,10 @@ type ServerState = {
   groups: Array<ServerGroup>;
   servers: Array<ServerSummary>;
   connections: Readonly<Record<string, ConnectionState>>;
+  /** Whether the startup load has finished, so the workspace can replace the startup screen. */
+  booted: boolean;
+  /** The latest sentence for the explorer's status region. */
+  announcement: string;
   /** Reads the lock state and, when unlocked, the saved servers. Called once at startup. */
   load: () => Promise<void>;
   unlock: (passphrase: string) => Promise<void>;
@@ -25,6 +29,8 @@ type ServerState = {
   saveGroup: (input: GroupInput) => Promise<ServerGroup>;
   deleteGroup: (id: string) => Promise<void>;
   connect: (id: string) => Promise<void>;
+  /** Stops a connect that is still in progress. */
+  cancelConnect: (id: string) => Promise<void>;
   disconnect: (id: string) => Promise<void>;
 };
 
@@ -50,10 +56,15 @@ export const useServerStore = create<ServerState>()((set, get) => {
     groups: [],
     servers: [],
     connections: {},
+    booted: false,
+    announcement: '',
 
     load: async () => {
-      if (!isTauri()) return;
-      await refresh();
+      try {
+        if (isTauri()) await refresh();
+      } finally {
+        set({ booted: true });
+      }
     },
 
     unlock: async (passphrase) => {
@@ -99,14 +110,21 @@ export const useServerStore = create<ServerState>()((set, get) => {
     },
 
     connect: async (id) => {
-      set((state) => ({ connections: { ...state.connections, [id]: { status: 'connecting' } } }));
+      set((state) => ({ connections: { ...state.connections, [id]: { status: 'connecting', started: Date.now() } } }));
+      const name = get().servers.find((server) => server.id === id)?.name ?? 'the server';
       try {
         const info = await api.connectServer(id);
-        set((state) => ({ connections: { ...state.connections, [id]: { status: 'connected', info } } }));
+        set((state) => ({ connections: { ...state.connections, [id]: { status: 'connected', info } }, announcement: `Connected to ${name}.` }));
       } catch (error) {
+        if (isCommandError(error) && error.kind === 'cancelled') {
+          set((state) => ({ connections: withoutKey(state.connections, id), announcement: `Stopped connecting to ${name}.` }));
+          return;
+        }
         set((state) => ({ connections: { ...state.connections, [id]: { status: 'failed', message: messageOf(error) } } }));
       }
     },
+
+    cancelConnect: (id) => api.cancelConnect(id),
 
     disconnect: async (id) => {
       await api.disconnectServer(id);

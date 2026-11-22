@@ -19,4 +19,6 @@ pub enum CommandError {
     Storage(String),
     #[error("{0}")]
     Connection(String),
+    #[error("{0}")]
+    Cancelled(String),
 }
