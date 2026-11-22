@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { useWorkspaceStore } from './workspace';
+import { clampSidebarWidth, useWorkspaceStore } from './workspace';
 
 const state = () => useWorkspaceStore.getState();
 
@@ -22,5 +22,13 @@ describe('the workspace store', () => {
     state().showView('performance');
 
     expect([state().active_view, state().sidebar_open]).toEqual(['performance', true]);
+  });
+
+  it('keeps the sidebar between 200 and 640 pixels, in whole pixels, and remembers it', () => {
+    expect([clampSidebarWidth(120), clampSidebarWidth(900), clampSidebarWidth(300.6)]).toEqual([200, 640, 301]);
+
+    state().setSidebarWidth(333.2);
+
+    expect(JSON.parse(localStorage.getItem('tidewater-workspace') ?? '{}').state).toEqual({ sidebar_width: 333 });
   });
 });

@@ -1,5 +1,6 @@
 import { mockIPC } from '@tauri-apps/api/mocks';
 import type { InvokeArgs } from '@tauri-apps/api/core';
+import type { CatalogNode, CatalogPath } from '../generated/catalog';
 import type { CommandError } from '../generated/errors';
 import type { ServerGroup, ServerInput, ServerSummary } from '../generated/servers';
 import type { StoreStatusView } from '../generated/store';
@@ -82,4 +83,8 @@ export function deferred<T>(): { promise: Promise<T>; resolve: (value: T) => voi
     resolve = settle;
   });
   return { promise, resolve };
+}
+
+export function catalogNode(key: string, label: string, children: CatalogPath | null = null, detail: string | null = null): CatalogNode {
+  return { key, label, detail, icon: children?.level === 'database' ? 'database' : 'table', children };
 }

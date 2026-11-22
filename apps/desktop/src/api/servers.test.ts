@@ -1,6 +1,7 @@
 import type { InvokeArgs } from '@tauri-apps/api/core';
 import { describe, expect, it } from 'vitest';
 import { mockCommands, serverInput } from '../testing/backend';
+import { catalogChildren } from './catalog';
 import * as api from './servers';
 
 const input = serverInput();
@@ -19,6 +20,7 @@ const commands: Array<[string, () => Promise<unknown>, InvokeArgs]> = [
   ['connect_server', () => api.connectServer('orders-dev'), { id: 'orders-dev' }],
   ['disconnect_server', () => api.disconnectServer('orders-dev'), { id: 'orders-dev' }],
   ['list_connections', () => api.listConnections(), {}],
+  ['catalog_children', () => catalogChildren('orders-dev', null, true), { server_id: 'orders-dev', path: null, show_system: true }],
 ];
 
 describe('the Rust command wrappers', () => {

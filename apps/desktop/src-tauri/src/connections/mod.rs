@@ -1,4 +1,4 @@
-//! Live database connections, kept by saved-server id.
+//! Live database connections, kept per saved server and database.
 
 pub mod probe;
 pub mod tls;
@@ -6,6 +6,7 @@ pub mod url;
 
 use std::collections::HashMap;
 use std::error::Error as _;
+use std::sync::Arc;
 use std::time::Duration;
 
 use serde::Serialize;
@@ -47,6 +48,7 @@ impl From<&SavedServer> for ConnectParams {
 #[ts(export, export_to = "connections.ts")]
 pub struct ConnectionInfo {
     pub server_id: String,
+    pub database: String,
     pub server_version: String,
     pub encryption: Option<String>,
 }
@@ -81,6 +83,12 @@ fn build_config(params: &ConnectParams) -> Config {
         config.options(options);
     }
     config
+}
+
+impl From<tokio_postgres::Error> for CommandError {
+    fn from(error: tokio_postgres::Error) -> Self {
+        CommandError::Connection(describe(&error))
+    }
 }
 
 /// The error's message followed by every underlying cause.
@@ -120,41 +128,63 @@ async fn session_info(client: &Client) -> Result<(String, Option<String>), tokio
     Ok((row.get(0), row.get(1)))
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+struct Key {
+    server_id: String,
+    database: String,
+}
+
 struct LiveConnection {
-    client: Client,
+    client: Arc<Client>,
     driver: JoinHandle<()>,
     info: ConnectionInfo,
 }
 
 #[derive(Default)]
 pub struct ConnectionManager {
-    live: tokio::sync::Mutex<HashMap<String, LiveConnection>>,
+    live: tokio::sync::Mutex<HashMap<Key, LiveConnection>>,
 }
 
 impl ConnectionManager {
-    pub async fn connect(&self, server_id: &str, params: ConnectParams) -> Result<ConnectionInfo, CommandError> {
-        if let Some(existing) = self.live.lock().await.get(server_id) {
+    /// The open client for `params.database` on this server, connecting first if it isn't open or the server closed it.
+    async fn ensure(&self, server_id: &str, params: &ConnectParams) -> Result<(Arc<Client>, ConnectionInfo), CommandError> {
+        let key = Key { server_id: server_id.to_string(), database: params.database.clone() };
+        if let Some(existing) = self.live.lock().await.get(&key) {
             if !existing.client.is_closed() {
-                return Ok(existing.info.clone());
+                return Ok((existing.client.clone(), existing.info.clone()));
             }
         }
-        let (client, driver) = open(&params).await.map_err(|error| CommandError::Connection(describe(&error)))?;
+        let (client, driver) = open(params).await?;
         let (server_version, encryption) = session_info(&client).await.map_err(|error| {
             driver.abort();
-            CommandError::Connection(describe(&error))
+            CommandError::from(error)
         })?;
-        let info = ConnectionInfo { server_id: server_id.to_string(), server_version, encryption };
+        let info = ConnectionInfo { server_id: key.server_id.clone(), database: key.database.clone(), server_version, encryption };
+        let client = Arc::new(client);
         let mut live = self.live.lock().await;
-        if let Some(previous) = live.insert(server_id.to_string(), LiveConnection { client, driver, info: info.clone() }) {
+        if let Some(previous) = live.insert(key, LiveConnection { client: client.clone(), driver, info: info.clone() }) {
             previous.driver.abort();
         }
-        Ok(info)
+        Ok((client, info))
     }
 
+    pub async fn connect(&self, server_id: &str, params: ConnectParams) -> Result<ConnectionInfo, CommandError> {
+        Ok(self.ensure(server_id, &params).await?.1)
+    }
+
+    pub async fn client(&self, server_id: &str, params: &ConnectParams) -> Result<Arc<Client>, CommandError> {
+        Ok(self.ensure(server_id, params).await?.0)
+    }
+
+    /// Closes every database connection open for this server.
     pub async fn disconnect(&self, server_id: &str) {
-        if let Some(connection) = self.live.lock().await.remove(server_id) {
+        self.live.lock().await.retain(|key, connection| {
+            if key.server_id != server_id {
+                return true;
+            }
             connection.driver.abort();
-        }
+            false
+        });
     }
 
     pub async fn list(&self) -> Vec<ConnectionInfo> {
@@ -257,10 +287,11 @@ mod tests {
     async fn live_connecting_again_replaces_a_session_the_server_closed() {
         let manager = ConnectionManager::default();
         manager.connect("server-a", live_params()).await.unwrap();
-        let pid: i32 = manager.live.lock().await["server-a"].client.query_one("SELECT pg_backend_pid()", &[]).await.unwrap().get(0);
+        let key = Key { server_id: "server-a".into(), database: live_params().database };
+        let pid: i32 = manager.live.lock().await[&key].client.query_one("SELECT pg_backend_pid()", &[]).await.unwrap().get(0);
         let (admin, admin_driver) = open(&live_params()).await.unwrap();
         admin.execute("SELECT pg_terminate_backend($1)", &[&pid]).await.unwrap();
-        (&mut manager.live.lock().await.get_mut("server-a").unwrap().driver).await.unwrap();
+        (&mut manager.live.lock().await.get_mut(&key).unwrap().driver).await.unwrap();
         assert!(manager.list().await.is_empty());
 
         manager.connect("server-a", live_params()).await.unwrap();
@@ -268,6 +299,25 @@ mod tests {
         assert_eq!(manager.list().await.len(), 1);
         manager.disconnect("server-a").await;
         admin_driver.abort();
+    }
+
+    #[tokio::test]
+    #[ignore = "needs TIDEWATER_TEST_DATABASE_URL pointing at a running Postgres"]
+    async fn live_disconnect_closes_every_database_of_a_server() {
+        let manager = ConnectionManager::default();
+        let params = live_params();
+        let mut second = params.clone();
+        second.database = "template1".into();
+        manager.client("server-a", &params).await.unwrap();
+        manager.client("server-a", &second).await.unwrap();
+        manager.client("server-b", &params).await.unwrap();
+        assert_eq!(manager.list().await.len(), 3);
+
+        manager.disconnect("server-a").await;
+
+        let remaining = manager.list().await;
+        assert_eq!(remaining.len(), 1);
+        assert_eq!(remaining[0].server_id, "server-b");
     }
 
     #[tokio::test]

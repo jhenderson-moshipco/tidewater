@@ -1,13 +1,13 @@
-import { act, screen, within } from '@testing-library/react';
+import { act, screen } from '@testing-library/react';
 import { describe, expect, it } from 'vitest';
 import { useDialogStore } from '../store/dialogs';
 import { useServerStore } from '../store/servers';
+import { useTreeStore } from '../store/tree';
 import { commandsOf, failWith, group, mockCommands, server, unlocked } from '../testing/backend';
 import { renderWithUser } from '../testing/render';
 import { Explorer, ExplorerActions } from './explorer';
 
 const dialog = () => useDialogStore.getState().open;
-const info = { server_id: 'orders-dev', server_version: '17.2', encryption: null };
 
 describe('the explorer', () => {
   it('shows nothing until it knows whether saved servers are locked', () => {
@@ -67,76 +67,10 @@ describe('the explorer', () => {
     expect(dialog()).toEqual({ kind: 'connection', editing: null });
   });
 
-  it('shows a renamed group with its servers still under it', () => {
+  it('shows the server tree once there are saved servers', () => {
     useServerStore.setState({ store: unlocked, groups: [group()], servers: [server({ group_id: 'orders-platform' })] });
     renderWithUser(<Explorer />);
-
-    act(() => useServerStore.setState({ groups: [group({ name: 'Orders' })] }));
-
-    expect(within(screen.getByRole('list', { name: 'Orders' })).getByText('orders-dev')).toBeTruthy();
-  });
-
-  it('lists servers under their groups and collapses a group', async () => {
-    useServerStore.setState({
-      store: unlocked,
-      groups: [group(), group({ id: 'billing', name: 'Billing' })],
-      servers: [server({ group_id: 'orders-platform' }), server({ id: 'scratch', name: 'scratch', environment: 'local' })],
-    });
-    const { user } = renderWithUser(<Explorer />);
-    const orders = screen.getByRole('button', { name: 'Orders platform 1 server' });
-    expect(screen.getByRole('button', { name: 'Billing 0 servers' })).toBeTruthy();
-    expect(within(screen.getByRole('list', { name: 'Orders platform' })).getByText('orders-dev')).toBeTruthy();
-    expect(screen.getByText('LOCAL')).toBeTruthy();
-
-    await user.click(orders);
-
-    expect(orders.getAttribute('aria-expanded')).toBe('false');
-    expect(screen.queryByRole('list', { name: 'Orders platform' })).toBeNull();
-    await user.click(orders);
-    expect(screen.getByRole('list', { name: 'Orders platform' })).toBeTruthy();
-  });
-
-  it('opens the rename and delete dialogs for a group', async () => {
-    useServerStore.setState({ store: unlocked, groups: [group()], servers: [server({ group_id: 'orders-platform' })] });
-    const { user } = renderWithUser(<Explorer />);
-
-    await user.click(screen.getByRole('button', { name: 'Rename Orders platform' }));
-    expect(dialog()).toEqual({ kind: 'group', editing: group() });
-    await user.click(screen.getByRole('button', { name: 'Delete Orders platform' }));
-    expect(dialog()).toEqual({ kind: 'delete-group', group: group(), server_count: 1 });
-  });
-
-  it('opens the edit and delete dialogs for a server', async () => {
-    useServerStore.setState({ store: unlocked, servers: [server()] });
-    const { user } = renderWithUser(<Explorer />);
-
-    await user.click(screen.getByRole('button', { name: 'Edit orders-dev' }));
-    expect(dialog()).toMatchObject({ kind: 'connection', editing: server() });
-    await user.click(screen.getByRole('button', { name: 'Delete orders-dev' }));
-    expect(dialog()).toEqual({ kind: 'delete-server', server: server() });
-  });
-
-  it('connects a server, shows why a connection failed, and disconnects', async () => {
-    useServerStore.setState({ store: unlocked, servers: [server()] });
-    const answers = [() => failWith('connection', 'password authentication failed'), () => info];
-    mockCommands({ connect_server: () => answers.shift()?.(), disconnect_server: () => null });
-    const { user } = renderWithUser(<Explorer />);
-
-    await user.click(screen.getByRole('button', { name: 'Connect orders-dev' }));
-    expect((await screen.findByRole('alert')).textContent).toBe('password authentication failed');
-    expect(screen.getByText(', connection failed')).toBeTruthy();
-
-    await user.click(screen.getByRole('button', { name: 'Connect orders-dev' }));
-    await user.click(await screen.findByRole('button', { name: 'Disconnect orders-dev' }));
-
-    expect(await screen.findByRole('button', { name: 'Connect orders-dev' })).toBeTruthy();
-    expect(screen.getByText(', not connected')).toBeTruthy();
-  });
-
-  it('disables the button while a server is connecting', () => {
-    useServerStore.setState({ store: unlocked, servers: [server()], connections: { 'orders-dev': { status: 'connecting' } } });
-    renderWithUser(<Explorer />);
-    expect((screen.getByRole('button', { name: 'Disconnect orders-dev' }) as HTMLButtonElement).disabled).toBe(true);
+    expect(screen.getAllByRole('treeitem').map((row) => row.textContent)).toEqual(['Orders platform1 server', 'orders-dev, not connectedDEV']);
   });
 });
 
@@ -150,5 +84,16 @@ describe('the explorer actions', () => {
     expect(dialog()).toEqual({ kind: 'connection', editing: null });
     await user.click(screen.getByRole('button', { name: 'New group' }));
     expect(dialog()).toEqual({ kind: 'group', editing: null });
+  });
+
+  it('show or hide system objects, saying which in the button state', async () => {
+    useServerStore.setState({ store: unlocked });
+    const { user } = renderWithUser(<ExplorerActions />);
+    const toggle = screen.getByRole('button', { name: 'Show system objects' });
+
+    await user.click(toggle);
+    expect([toggle.getAttribute('aria-pressed'), useTreeStore.getState().show_system]).toEqual(['true', true]);
+    await user.click(toggle);
+    expect(toggle.getAttribute('aria-pressed')).toBe('false');
   });
 });

@@ -3,6 +3,7 @@ import { messageOf } from '../api/errors';
 import type { ServerGroup, ServerSummary } from '../generated/servers';
 import { useDialogStore } from '../store/dialogs';
 import { useServerStore } from '../store/servers';
+import { useTreeStore } from '../store/tree';
 import { fieldText } from '../utils/forms';
 import { ConnectionDialog } from './connection-dialog';
 import { Modal, closeDialogOf } from './modal';
@@ -94,7 +95,10 @@ function deleteServerModel(server: ServerSummary) {
     title: `Delete ${server.name}?`,
     message: server.has_password ? 'Its saved settings and password are removed.' : 'Its saved settings are removed.',
     confirm_label: 'Delete',
-    action: () => useServerStore.getState().deleteServer(server.id),
+    action: async () => {
+      await useServerStore.getState().deleteServer(server.id);
+      useTreeStore.getState().forgetServer(server.id);
+    },
   };
 }
 

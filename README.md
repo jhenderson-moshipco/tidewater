@@ -77,7 +77,7 @@ A few tests connect to a real server. They're skipped unless you point them at o
 TIDEWATER_TEST_DATABASE_URL="postgres://user:password@localhost:5432/postgres" cargo test -- --ignored
 ```
 
-The app is early: you can save servers and groups, test a connection step by step, and connect and disconnect. Running queries is next.
+The app is early: you can save servers and groups, test a connection step by step, connect and disconnect, and browse each database's schemas, tables, partitions, columns, views, functions, types and extensions. Running queries is next.
 
 ## Documentation
 

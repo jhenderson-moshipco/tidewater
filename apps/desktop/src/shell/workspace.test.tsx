@@ -6,7 +6,7 @@ import { unlocked } from '../testing/backend';
 import { renderWithUser } from '../testing/render';
 import { Workspace } from './workspace';
 
-const info = { server_id: 'orders-dev', server_version: '17.2', encryption: null };
+const info = { server_id: 'orders-dev', database: 'orders', server_version: '17.2', encryption: null };
 
 describe('the workspace', () => {
   it('opens a view from the activity bar, and pressing it again closes the sidebar', async () => {

@@ -47,7 +47,7 @@
 }
 
 .sidebar {
-  width: 272px;
+  position: relative;
   flex: none;
   display: flex;
   flex-direction: column;
@@ -116,4 +116,33 @@
   border-top: 1px solid var(--tw-border);
   font-size: var(--tw-font-size-small);
   color: var(--tw-text-muted);
+}
+
+.resizer {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  right: -4px;
+  z-index: 1;
+  width: 8px;
+  cursor: col-resize;
+  touch-action: none;
+}
+
+.resizer::after {
+  content: '';
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 3px;
+  width: 2px;
+}
+
+.resizer:hover::after,
+.resizer:focus-visible::after {
+  background: var(--tw-accent);
+}
+
+.resizer:focus-visible {
+  outline: none;
 }
