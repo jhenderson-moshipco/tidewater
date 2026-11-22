@@ -23,12 +23,13 @@ import { useDialogStore } from '../store/dialogs';
 import { useExplorerStore } from '../store/explorer';
 import { useServerStore } from '../store/servers';
 import { useTreeStore } from '../store/tree';
+import { useWorkspaceStore } from '../store/workspace';
+import { Elapsed } from '../shell/elapsed';
 import { environmentLabel } from './connection-form';
 import classes from './servers.module.css';
 import { retryRow, rowMenu, showContextMenu } from './tree-menu';
-import { buildRows, keyAction, type TreeRow } from './tree-rows';
+import { ROW_HEIGHT, buildRows, keyAction, rowIndexAt, rowLayout, type RowLayout, type TreeRow } from './tree-rows';
 
-const ROW_HEIGHT = 24;
 const OVERSCAN = 12;
 
 const node_icons: Readonly<Record<NodeIcon, Icon>> = {
@@ -69,27 +70,32 @@ function activate(row: TreeRow, rows: ReadonlyArray<TreeRow>): void {
   else if (row.expandable) toggle(row);
 }
 
-function scrollToIndex(container: HTMLElement, index: number): void {
-  const top = index * ROW_HEIGHT;
+function scrollToIndex(container: HTMLElement, layout: RowLayout, index: number): void {
+  const top = layout.tops[index] as number;
+  const height = layout.heights[index] as number;
   if (top < container.scrollTop) container.scrollTop = top;
-  else if (top + ROW_HEIGHT > container.scrollTop + container.clientHeight) container.scrollTop = top + ROW_HEIGHT - container.clientHeight;
+  else if (top + height > container.scrollTop + container.clientHeight) container.scrollTop = top + height - container.clientHeight;
 }
 
-function openRowMenu(row: TreeRow, rows: ReadonlyArray<TreeRow>, container: HTMLElement, index: number): void {
+function openRowMenu(row: TreeRow, rows: ReadonlyArray<TreeRow>, container: HTMLElement, layout: RowLayout, index: number): void {
   const box = container.getBoundingClientRect();
-  const y = box.top + index * ROW_HEIGHT - container.scrollTop + ROW_HEIGHT;
+  const y = box.top + (layout.tops[index] as number) - container.scrollTop + ROW_HEIGHT;
   void showContextMenu(rowMenu(row, rows), { x: box.left + 24, y });
 }
 
-function shortcut(event: KeyboardEvent<HTMLDivElement>, row: TreeRow, rows: ReadonlyArray<TreeRow>, index: number): boolean {
+function shortcut(event: KeyboardEvent<HTMLDivElement>, row: TreeRow, rows: ReadonlyArray<TreeRow>, layout: RowLayout, index: number): boolean {
   const item = row.item;
   const dialogs = useDialogStore.getState();
+  if (event.key === 'Escape' && item.type === 'server' && item.connection?.status === 'connecting') {
+    void useServerStore.getState().cancelConnect(item.server.id);
+    return true;
+  }
   if (event.key === 'Enter') {
     activate(row, rows);
     return true;
   }
   if ((event.key === 'F10' && event.shiftKey) || event.key === 'ContextMenu') {
-    openRowMenu(row, rows, event.currentTarget, index);
+    openRowMenu(row, rows, event.currentTarget, layout, index);
     return true;
   }
   if (event.key === 'F5') {
@@ -119,15 +125,16 @@ function RowLead({ row }: { row: TreeRow }) {
   const item = row.item;
   if (item.type === 'server') {
     const state = item.connection?.status ?? 'idle';
+    if (state === 'connecting') return <span aria-hidden="true" className="spinner" />;
     return <span aria-hidden className={classes.dot} data-state={state} />;
   }
+  if (item.type === 'loading') return <span aria-hidden="true" className="spinner" />;
   if (item.type === 'node') {
     const NodeIconComponent = node_icons[item.node.icon];
     return <NodeIconComponent size={14} aria-hidden className={classes.rowIcon} />;
   }
   if (item.type === 'group') return <IconFolder size={14} aria-hidden className={classes.rowIcon} />;
-  if (item.type === 'error') return <IconX size={14} aria-hidden className={classes.failed} />;
-  return null;
+  return <IconX size={14} aria-hidden className={classes.failed} />;
 }
 
 function RowTrail({ row }: { row: TreeRow }) {
@@ -140,6 +147,11 @@ function RowTrail({ row }: { row: TreeRow }) {
         <span className={classes.badge} data-environment={item.server.environment}>
           {environmentLabel(item.server.environment)}
         </span>
+        {item.connection?.status === 'connecting' && (
+          <span className={classes.rowDetail}>
+            Connecting… <Elapsed started={item.connection.started} />
+          </span>
+        )}
       </>
     );
   }
@@ -164,20 +176,22 @@ export function ServerTree() {
   const children = useTreeStore((state) => state.children);
   const active_id = useTreeStore((state) => state.active_id);
   const announcement = useTreeStore((state) => state.announcement);
+  const width = useWorkspaceStore((state) => state.sidebar_width);
   const [scroll_top, setScrollTop] = useState(0);
 
   const rows = buildRows({ groups, servers, connections, collapsed_groups, expanded, children });
+  const layout = rowLayout(rows, width);
   const active_index = Math.max(0, rows.findIndex((row) => row.id === active_id));
   const active = rows[active_index];
 
-  const first = Math.max(0, Math.floor(scroll_top / ROW_HEIGHT) - OVERSCAN);
+  const first = Math.max(0, rowIndexAt(layout, scroll_top) - OVERSCAN);
   const count = Math.ceil(window.innerHeight / ROW_HEIGHT) + OVERSCAN * 2;
   const shown = rows.slice(first, first + count).map((row, offset) => ({ row, index: first + offset }));
   if (active && (active_index < first || active_index >= first + count)) shown.push({ row: active, index: active_index });
 
   const keyDown = (event: KeyboardEvent<HTMLDivElement>) => {
     if (!active) return;
-    if (shortcut(event, active, rows, active_index)) {
+    if (shortcut(event, active, rows, layout, active_index)) {
       event.preventDefault();
       return;
     }
@@ -187,7 +201,7 @@ export function ServerTree() {
     const tree = useTreeStore.getState();
     if (action.type === 'focus') {
       tree.setActive(action.row.id);
-      scrollToIndex(event.currentTarget, rows.indexOf(action.row));
+      scrollToIndex(event.currentTarget, layout, rows.indexOf(action.row));
     } else if (action.type === 'expand') void tree.expandRow(action.row);
     else tree.collapseRow(action.row);
   };
@@ -208,7 +222,7 @@ export function ServerTree() {
         onKeyDown={keyDown}
         onScroll={(event: UIEvent<HTMLDivElement>) => setScrollTop(event.currentTarget.scrollTop)}
       >
-        <div className={classes.treeSpacer} style={{ height: rows.length * ROW_HEIGHT }}>
+        <div className={classes.treeSpacer} style={{ height: layout.total }}>
           {shown.map(({ row, index }) => (
             <div
               key={row.id}
@@ -219,10 +233,11 @@ export function ServerTree() {
               aria-posinset={row.posinset}
               aria-expanded={row.expandable ? row.expanded : undefined}
               aria-selected={row.id === active?.id}
+              aria-keyshortcuts={row.item.type === 'server' && row.item.connection?.status === 'connecting' ? 'Escape' : undefined}
               data-active={row.id === active?.id}
               data-kind={row.item.type}
               className={classes.row}
-              style={{ top: index * ROW_HEIGHT, paddingInlineStart: 6 + (row.level - 1) * 10 }}
+              style={{ top: layout.tops[index], height: layout.heights[index], paddingInlineStart: 6 + (row.level - 1) * 10 }}
               onClick={(event) => pick(event, row)}
               onDoubleClick={() => activate(row, rows)}
               onContextMenu={(event) => {

@@ -178,3 +178,43 @@ export function keyAction(rows: ReadonlyArray<TreeRow>, active_id: string | null
   }
   return null;
 }
+
+export const ROW_HEIGHT = 24;
+const ERROR_LINE_HEIGHT = 18;
+/** A little wider than the average character at the tree's font size, so a wrapped message is never cut off. */
+const CHAR_WIDTH = 7;
+
+/** A row's height in a sidebar `width` pixels wide. Error rows wrap, so they get as many lines as their message needs. */
+export function rowHeight(row: TreeRow, width: number): number {
+  if (row.item.type !== 'error') return ROW_HEIGHT;
+  const available = Math.max(80, width - (6 + (row.level - 1) * 10) - 52);
+  const lines = Math.ceil((row.label.length * CHAR_WIDTH) / available);
+  return Math.max(ROW_HEIGHT, lines * ERROR_LINE_HEIGHT + 6);
+}
+
+export type RowLayout = { tops: Array<number>; heights: Array<number>; total: number };
+
+export function rowLayout(rows: ReadonlyArray<TreeRow>, width: number): RowLayout {
+  const tops: Array<number> = [];
+  const heights: Array<number> = [];
+  let total = 0;
+  for (const row of rows) {
+    const height = rowHeight(row, width);
+    tops.push(total);
+    heights.push(height);
+    total += height;
+  }
+  return { tops, heights, total };
+}
+
+/** The index of the row at `offset` pixels down the tree. */
+export function rowIndexAt(layout: RowLayout, offset: number): number {
+  let low = 0;
+  let high = layout.tops.length - 1;
+  while (low < high) {
+    const middle = Math.ceil((low + high) / 2);
+    if ((layout.tops[middle] as number) <= offset) low = middle;
+    else high = middle - 1;
+  }
+  return Math.max(0, low);
+}

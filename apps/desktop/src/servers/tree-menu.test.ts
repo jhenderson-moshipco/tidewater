@@ -71,6 +71,17 @@ describe('rowMenu', () => {
     expect(useDialogStore.getState().open).toEqual({ kind: 'delete-server', server: server() });
   });
 
+  it('offers to cancel a server that is still connecting', () => {
+    const calls = mockCommands({ cancel_connect: () => null });
+    const connecting = row({ type: 'server', server: server(), connection: { status: 'connecting', started: 0 } });
+    const entries = rowMenu(connecting, []);
+    expect(texts(entries)[0]).toBe('Cancel Connecting');
+
+    run(entries, 'Cancel Connecting');
+
+    expect(calls).toEqual([{ command: 'cancel_connect', args: { id: 'orders-dev' } }]);
+  });
+
   it('offers to disconnect or refresh a connected server', async () => {
     const refreshRow = vi.fn(async () => undefined);
     useTreeStore.setState({ refreshRow });
