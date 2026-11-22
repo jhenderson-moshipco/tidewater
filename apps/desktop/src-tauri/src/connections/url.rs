@@ -109,16 +109,32 @@ pub fn parse_connection_string(input: &str) -> Result<ParsedConnection, CommandE
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::testing::parts;
+
+    fn tls_of(input: &str) -> Option<TlsMode> {
+        parse_connection_string(input).unwrap().tls
+    }
+
+    fn rejection(input: &str) -> String {
+        let (kind, message) = parts(parse_connection_string(input).unwrap_err());
+        assert_eq!(kind, "invalid");
+        message
+    }
 
     #[test]
     fn reads_every_field_from_a_url_including_verify_full() {
         let parsed = parse_connection_string("postgres://app_user:s3cret@db.example.com:5433/orders?sslmode=verify-full&application_name=x").unwrap();
-        assert_eq!(parsed.host.as_deref(), Some("db.example.com"));
-        assert_eq!(parsed.port, Some(5433));
-        assert_eq!(parsed.database.as_deref(), Some("orders"));
-        assert_eq!(parsed.user.as_deref(), Some("app_user"));
-        assert_eq!(parsed.password.as_deref(), Some("s3cret"));
-        assert_eq!(parsed.tls, Some(TlsMode::VerifyFull));
+        assert_eq!(
+            parsed,
+            ParsedConnection {
+                host: Some("db.example.com".into()),
+                port: Some(5433),
+                database: Some("orders".into()),
+                user: Some("app_user".into()),
+                password: Some("s3cret".into()),
+                tls: Some(TlsMode::VerifyFull),
+            }
+        );
     }
 
     #[test]
@@ -129,6 +145,16 @@ mod tests {
         assert_eq!(parsed.user, None);
         assert_eq!(parsed.password, None);
         assert_eq!(parsed.tls, None);
+    }
+
+    #[test]
+    fn reads_every_sslmode_from_a_url() {
+        assert_eq!(tls_of("postgres://h/db?sslmode=disable"), Some(TlsMode::Disable));
+        assert_eq!(tls_of("postgres://h/db?sslmode=allow"), Some(TlsMode::Disable));
+        assert_eq!(tls_of("postgres://h/db?sslmode=prefer"), Some(TlsMode::Prefer));
+        assert_eq!(tls_of("postgres://h/db?sslmode=require"), Some(TlsMode::Require));
+        assert_eq!(tls_of("postgres://h/db?sslmode=verify-ca"), Some(TlsMode::VerifyCa));
+        assert_eq!(tls_of("postgres://h/db?sslmode=sometimes"), None);
     }
 
     #[test]
@@ -146,14 +172,27 @@ mod tests {
     }
 
     #[test]
-    fn maps_require_and_disable_from_key_value_strings() {
-        assert_eq!(parse_connection_string("host=h sslmode=require").unwrap().tls, Some(TlsMode::Require));
-        assert_eq!(parse_connection_string("host=h sslmode=disable").unwrap().tls, Some(TlsMode::Disable));
+    fn maps_require_disable_and_prefer_from_key_value_strings() {
+        assert_eq!(tls_of("host=h sslmode=require"), Some(TlsMode::Require));
+        assert_eq!(tls_of("host=h sslmode=disable"), Some(TlsMode::Disable));
+        assert_eq!(tls_of("host=h sslmode=prefer"), Some(TlsMode::Prefer));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn reads_a_unix_socket_directory_as_the_host() {
+        assert_eq!(parse_connection_string("host=/var/run/postgresql").unwrap().host.as_deref(), Some("/var/run/postgresql"));
     }
 
     #[test]
     fn rejects_empty_and_malformed_input() {
-        assert!(matches!(parse_connection_string("   "), Err(CommandError::Invalid(_))));
-        assert!(matches!(parse_connection_string("postgres://[bad"), Err(CommandError::Invalid(_))));
+        assert_eq!(rejection("   "), "Paste a connection URL or key=value string");
+        assert!(rejection("postgres://[bad").starts_with("Not a valid connection URL: "));
+        assert!(rejection("host=h bogus=1").starts_with("Couldn't read the connection string: "));
+    }
+
+    #[test]
+    fn rejects_a_password_that_isnt_utf8() {
+        assert_eq!(rejection("postgres://u:%FF@h/db"), "The password isn't valid UTF-8");
     }
 }

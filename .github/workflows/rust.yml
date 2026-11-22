@@ -1,0 +1,70 @@
+name: Rust
+
+on:
+  pull_request:
+    paths:
+      - "apps/desktop/src-tauri/**"
+      - ".github/workflows/rust.yml"
+  push:
+    branches: [main]
+    paths:
+      - "apps/desktop/src-tauri/**"
+      - ".github/workflows/rust.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: rust-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  coverage:
+    name: Tests and coverage
+    runs-on: ubuntu-24.04
+    defaults:
+      run:
+        working-directory: apps/desktop/src-tauri
+    env:
+      TIDEWATER_TEST_DATABASE_URL: postgres://tidewater:testpass@localhost:5432/postgres?sslmode=require
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install Tauri's Linux dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libxdo-dev libssl-dev librsvg2-dev
+
+      - name: Start Postgres with TLS
+        run: |
+          docker run --detach --name postgres --publish 5432:5432 \
+            --env POSTGRES_USER=tidewater --env POSTGRES_PASSWORD=testpass \
+            postgres:17 \
+            -c ssl=on \
+            -c ssl_cert_file=/etc/ssl/certs/ssl-cert-snakeoil.pem \
+            -c ssl_key_file=/etc/ssl/private/ssl-cert-snakeoil.key
+          for attempt in $(seq 30); do
+            docker exec postgres pg_isready --host 127.0.0.1 --username tidewater && exit 0
+            sleep 1
+          done
+          docker logs postgres
+          exit 1
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: llvm-tools-preview
+
+      - uses: taiki-e/install-action@cargo-llvm-cov
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: apps/desktop/src-tauri
+
+      - name: Run every test and require full coverage
+        run: >
+          cargo llvm-cov --lib
+          --ignore-filename-regex 'main\.rs'
+          --fail-under-lines 100
+          --fail-under-functions 100
+          --fail-under-regions 100
+          -- --include-ignored

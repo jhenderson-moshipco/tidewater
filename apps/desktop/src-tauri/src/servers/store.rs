@@ -3,7 +3,7 @@
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::sync::{Mutex, MutexGuard, OnceLock, PoisonError};
 
 use argon2::{Algorithm, Argon2, Params, Version};
 use base64::Engine;
@@ -61,7 +61,8 @@ enum State {
 pub struct ServerStore<V: KeyVault> {
     path: PathBuf,
     vault: V,
-    state: Mutex<State>,
+    /// Empty until first use, so the keychain and file are never read at launch.
+    state: OnceLock<Mutex<State>>,
 }
 
 fn read_file(path: &Path) -> Result<Option<StoreFile>, String> {
@@ -78,21 +79,21 @@ fn read_file(path: &Path) -> Result<Option<StoreFile>, String> {
     Ok(Some(file))
 }
 
-fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), CommandError> {
-    let storage = |error: std::io::Error| CommandError::Storage(format!("Couldn't save servers: {error}"));
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent).map_err(storage)?;
-    }
-    let temporary = path.with_extension("json.tmp");
-    let mut file = fs::File::create(&temporary).map_err(storage)?;
+fn write_private(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    let mut options = fs::OpenOptions::new();
+    options.write(true).create(true).truncate(true);
     #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        file.set_permissions(fs::Permissions::from_mode(0o600)).map_err(storage)?;
-    }
-    file.write_all(bytes).map_err(storage)?;
-    file.sync_all().map_err(storage)?;
-    fs::rename(&temporary, path).map_err(storage)
+    std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
+    options.open(path).and_then(|mut file| file.write_all(bytes).and_then(|()| file.sync_all()))
+}
+
+fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), CommandError> {
+    let temporary = path.with_extension("json.tmp");
+    path.parent()
+        .map_or(Ok(()), fs::create_dir_all)
+        .and_then(|()| write_private(&temporary, bytes))
+        .and_then(|()| fs::rename(&temporary, path))
+        .map_err(|error| CommandError::Storage(format!("Couldn't save servers: {error}")))
 }
 
 fn decrypt_list(file: &StoreFile, key: &Fernet) -> Option<ServerList> {
@@ -100,16 +101,16 @@ fn decrypt_list(file: &StoreFile, key: &Fernet) -> Option<ServerList> {
     serde_json::from_slice(&bytes).ok()
 }
 
-fn new_kdf_params() -> Result<KdfParams, CommandError> {
+fn new_kdf_params() -> KdfParams {
     let mut salt = [0u8; argon2::RECOMMENDED_SALT_LEN];
-    getrandom::fill(&mut salt).map_err(|error| CommandError::Storage(format!("Couldn't generate a salt: {error}")))?;
-    Ok(KdfParams {
+    getrandom::fill(&mut salt).expect("the system's random number source failed");
+    KdfParams {
         algorithm: "argon2id".into(),
         salt: STANDARD.encode(salt),
         memory_kib: Params::DEFAULT_M_COST,
         iterations: Params::DEFAULT_T_COST,
         parallelism: Params::DEFAULT_P_COST,
-    })
+    }
 }
 
 fn derive_key(passphrase: &str, kdf: &KdfParams) -> Result<Fernet, CommandError> {
@@ -123,7 +124,26 @@ fn derive_key(passphrase: &str, kdf: &KdfParams) -> Result<Fernet, CommandError>
     Argon2::new(Algorithm::Argon2id, Version::V0x13, params)
         .hash_password_into(passphrase.as_bytes(), &salt, &mut key)
         .map_err(|error| invalid(error.to_string()))?;
-    Fernet::new(&URL_SAFE.encode(key)).ok_or_else(|| invalid("derived key was rejected".into()))
+    Ok(Fernet::new(&URL_SAFE.encode(key)).expect("32 bytes always make a valid Fernet key"))
+}
+
+/// The unlocked state for a passphrase: the file's servers when it exists, otherwise a new empty list.
+fn passphrase_state(path: &Path, passphrase: &str) -> Result<State, CommandError> {
+    match read_file(path).map_err(CommandError::Storage)? {
+        Some(file) => {
+            let kdf = file.kdf.clone().ok_or_else(|| CommandError::Invalid("The saved-server file isn't passphrase-protected".into()))?;
+            let key = derive_key(passphrase, &kdf)?;
+            let list = decrypt_list(&file, &key).ok_or_else(|| CommandError::WrongPassphrase("That passphrase doesn't unlock the saved servers".into()))?;
+            Ok(State::Unlocked { list, key: Some(key), kdf: Some(kdf) })
+        }
+        None if passphrase.chars().count() < MIN_PASSPHRASE_CHARS => {
+            Err(CommandError::Invalid(format!("Use at least {MIN_PASSPHRASE_CHARS} characters")))
+        }
+        None => {
+            let kdf = new_kdf_params();
+            derive_key(passphrase, &kdf).map(|key| State::Unlocked { list: ServerList::default(), key: Some(key), kdf: Some(kdf) })
+        }
+    }
 }
 
 fn initial_state(path: &Path, vault: &impl KeyVault) -> State {
@@ -152,13 +172,16 @@ fn initial_state(path: &Path, vault: &impl KeyVault) -> State {
 }
 
 impl<V: KeyVault> ServerStore<V> {
-    pub fn open(path: PathBuf, vault: V) -> Self {
-        let state = initial_state(&path, &vault);
-        ServerStore { path, vault, state: Mutex::new(state) }
+    /// Creates the store without touching the keychain or the file; both are read on first use.
+    pub fn new(path: PathBuf, vault: V) -> Self {
+        ServerStore { path, vault, state: OnceLock::new() }
     }
 
-    fn lock(&self) -> std::sync::MutexGuard<'_, State> {
-        self.state.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+    fn lock(&self) -> MutexGuard<'_, State> {
+        self.state
+            .get_or_init(|| Mutex::new(initial_state(&self.path, &self.vault)))
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
     }
 
     fn status_of(&self, state: &State) -> StoreStatusView {
@@ -181,36 +204,24 @@ impl<V: KeyVault> ServerStore<V> {
         if !matches!(*state, State::NeedsPassphrase) {
             return Err(CommandError::Invalid("Saved servers aren't waiting for a passphrase".into()));
         }
-        let next = match read_file(&self.path).map_err(CommandError::Storage)? {
-            Some(file) => {
-                let kdf = file.kdf.clone().ok_or_else(|| CommandError::Invalid("The saved-server file isn't passphrase-protected".into()))?;
-                let key = derive_key(passphrase, &kdf)?;
-                let list = decrypt_list(&file, &key).ok_or_else(|| CommandError::WrongPassphrase("That passphrase doesn't unlock the saved servers".into()))?;
-                State::Unlocked { list, key: Some(key), kdf: Some(kdf) }
-            }
-            None => {
-                if passphrase.chars().count() < MIN_PASSPHRASE_CHARS {
-                    return Err(CommandError::Invalid(format!("Use at least {MIN_PASSPHRASE_CHARS} characters")));
-                }
-                let kdf = new_kdf_params()?;
-                let key = derive_key(passphrase, &kdf)?;
-                State::Unlocked { list: ServerList::default(), key: Some(key), kdf: Some(kdf) }
-            }
-        };
-        *state = next;
+        *state = passphrase_state(&self.path, passphrase)?;
         Ok(self.status_of(&state))
     }
 
     /// Sets a locked file aside under a dated name and starts with no saved servers. The old file is never deleted.
     pub fn start_fresh(&self) -> Result<StoreStatusView, CommandError> {
+        let stamp = time::OffsetDateTime::now_utc()
+            .format(time::macros::format_description!("[year]-[month]-[day]-[hour][minute][second]"))
+            .expect("a UTC timestamp always formats");
+        self.start_fresh_as(&stamp)
+    }
+
+    fn start_fresh_as(&self, stamp: &str) -> Result<StoreStatusView, CommandError> {
         let mut state = self.lock();
         if matches!(*state, State::Unlocked { .. }) {
             return Err(CommandError::Invalid("Saved servers are already unlocked".into()));
         }
         if self.path.exists() {
-            let stamp = time::OffsetDateTime::now_utc()
-                .format(time::macros::format_description!("[year]-[month]-[day]-[hour][minute][second]"))
-                .map_err(|error| CommandError::Storage(error.to_string()))?;
             let aside = self.path.with_file_name(format!("servers.locked-{stamp}.json"));
             fs::rename(&self.path, &aside).map_err(|error| CommandError::Storage(format!("Couldn't set the old file aside: {error}")))?;
         }
@@ -241,14 +252,14 @@ impl<V: KeyVault> ServerStore<V> {
                 self.vault
                     .write(&generated)
                     .map_err(|error| CommandError::Storage(format!("Couldn't store the encryption key in the system keychain: {error}")))?;
-                let fernet = Fernet::new(&generated).ok_or_else(|| CommandError::Storage("Generated key was rejected".into()))?;
+                let fernet = Fernet::new(&generated).expect("a generated key is always valid");
                 *key = Some(fernet.clone());
                 fernet
             }
         };
-        let plain = serde_json::to_vec(&next).map_err(|error| CommandError::Storage(error.to_string()))?;
+        let plain = serde_json::to_vec(&next).expect("a server list always serializes");
         let file = StoreFile { format: FILE_FORMAT, kdf: kdf.clone(), token: fernet.encrypt(&plain) };
-        let bytes = serde_json::to_vec_pretty(&file).map_err(|error| CommandError::Storage(error.to_string()))?;
+        let bytes = serde_json::to_vec_pretty(&file).expect("the store file always serializes");
         write_atomic(&self.path, &bytes)?;
         *list = next;
         Ok(result)
@@ -257,41 +268,57 @@ impl<V: KeyVault> ServerStore<V> {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
     use super::*;
-    use crate::servers::model::{Environment, PasswordChange, ServerInput, SessionDefaults, TlsMode};
+    use crate::testing::parts;
+    use crate::servers::model::{Environment, PasswordChange, ServerInput, ServerSummary, SessionDefaults, TlsMode};
+
+    #[derive(Default)]
+    enum Keychain {
+        #[default]
+        Working,
+        NoKeyring,
+        Refusing,
+    }
 
     #[derive(Default)]
     struct MemoryVault {
         key: Mutex<Option<String>>,
-        no_keyring: bool,
+        keychain: Keychain,
+        reads: AtomicUsize,
     }
 
     impl KeyVault for MemoryVault {
         fn read(&self) -> KeyLookup {
-            if self.no_keyring {
-                return KeyLookup::NoKeyring("no secret service".into());
-            }
-            match self.key.lock().unwrap().clone() {
-                Some(key) => KeyLookup::Found(key),
-                None => KeyLookup::Missing,
+            self.reads.fetch_add(1, Ordering::SeqCst);
+            match self.keychain {
+                Keychain::Working => match self.key.lock().unwrap().clone() {
+                    Some(key) => KeyLookup::Found(key),
+                    None => KeyLookup::Missing,
+                },
+                Keychain::NoKeyring => KeyLookup::NoKeyring("no secret service".into()),
+                Keychain::Refusing => KeyLookup::Failed("denied".into()),
             }
         }
 
         fn write(&self, key: &str) -> Result<(), String> {
-            if self.no_keyring {
-                return Err("no secret service".into());
+            match self.keychain {
+                Keychain::Working => {
+                    *self.key.lock().unwrap() = Some(key.to_string());
+                    Ok(())
+                }
+                Keychain::NoKeyring | Keychain::Refusing => Err("denied".into()),
             }
-            *self.key.lock().unwrap() = Some(key.to_string());
-            Ok(())
         }
     }
 
     fn vault_with(key: Option<String>) -> MemoryVault {
-        MemoryVault { key: Mutex::new(key), no_keyring: false }
+        MemoryVault { key: Mutex::new(key), ..MemoryVault::default() }
     }
 
-    fn no_keyring() -> MemoryVault {
-        MemoryVault { key: Mutex::new(None), no_keyring: true }
+    fn keychain(keychain: Keychain) -> MemoryVault {
+        MemoryVault { keychain, ..MemoryVault::default() }
     }
 
     fn server(name: &str) -> ServerInput {
@@ -314,14 +341,64 @@ mod tests {
         store.vault.key.lock().unwrap().clone()
     }
 
+    fn add<V: KeyVault>(store: &ServerStore<V>, name: &str) -> Result<ServerSummary, CommandError> {
+        store.update(|list| list.upsert_server(server(name)))
+    }
+
+    fn try_count<V: KeyVault>(store: &ServerStore<V>) -> Result<usize, CommandError> {
+        store.read(|list| Ok(list.servers.len()))
+    }
+
+    fn server_count<V: KeyVault>(store: &ServerStore<V>) -> usize {
+        try_count(store).unwrap()
+    }
+
+    /// A folder holding a keychain-protected file with one server, and the key that opens it.
+    fn saved_file() -> (tempfile::TempDir, PathBuf, Option<String>) {
+        let folder = tempfile::tempdir().unwrap();
+        let path = folder.path().join("servers.json");
+        let store = ServerStore::new(path.clone(), vault_with(None));
+        add(&store, "orders-prod").unwrap();
+        let key = saved_key(&store);
+        (folder, path, key)
+    }
+
+    fn locked_reason<V: KeyVault>(store: &ServerStore<V>) -> String {
+        let status = store.status();
+        assert_eq!(status.status, StoreStatus::Locked);
+        status.reason.expect("a locked store says why")
+    }
+
+    fn kdf(algorithm: &str, salt: &str, memory_kib: u32) -> KdfParams {
+        KdfParams { algorithm: algorithm.into(), salt: salt.into(), memory_kib, iterations: 1, parallelism: 1 }
+    }
+
+    fn invalid_settings(settings: KdfParams) -> String {
+        let (kind, message) = parts(derive_key("passphrase", &settings).err().unwrap());
+        assert_eq!(kind, "storage");
+        message.strip_prefix("The saved-server file's key settings are invalid: ").unwrap().to_string()
+    }
+
+    #[test]
+    fn creating_the_store_reads_nothing_until_first_use() {
+        let folder = tempfile::tempdir().unwrap();
+        let store = ServerStore::new(folder.path().join("servers.json"), vault_with(None));
+        assert_eq!(store.vault.reads.load(Ordering::SeqCst), 0);
+
+        store.status();
+        store.status();
+
+        assert_eq!(store.vault.reads.load(Ordering::SeqCst), 1);
+    }
+
     #[test]
     fn a_first_save_generates_a_key_and_writes_only_ciphertext() {
         let folder = tempfile::tempdir().unwrap();
         let path = folder.path().join("servers.json");
-        let store = ServerStore::open(path.clone(), vault_with(None));
+        let store = ServerStore::new(path.clone(), vault_with(None));
         assert_eq!(store.status().status, StoreStatus::Unlocked);
 
-        store.update(|list| list.upsert_server(server("orders-prod"))).unwrap();
+        add(&store, "orders-prod").unwrap();
 
         assert!(saved_key(&store).is_some());
         let on_disk = fs::read_to_string(&path).unwrap();
@@ -329,54 +406,129 @@ mod tests {
         assert!(!on_disk.contains("db.example.com"));
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn the_saved_file_is_readable_only_by_its_owner() {
+        use std::os::unix::fs::PermissionsExt;
+        let (_folder, path, _key) = saved_file();
+        assert_eq!(fs::metadata(path).unwrap().permissions().mode() & 0o777, 0o600);
+    }
+
     #[test]
     fn reopening_with_the_same_key_restores_the_servers() {
-        let folder = tempfile::tempdir().unwrap();
-        let path = folder.path().join("servers.json");
-        let store = ServerStore::open(path.clone(), vault_with(None));
-        store.update(|list| list.upsert_server(server("orders-prod"))).unwrap();
-        let key = saved_key(&store);
+        let (_folder, path, key) = saved_file();
 
-        let reopened = ServerStore::open(path, vault_with(key));
+        let reopened = ServerStore::new(path, vault_with(key));
 
         let names = reopened.read(|list| Ok(list.servers.iter().map(|s| s.name.clone()).collect::<Vec<_>>())).unwrap();
         assert_eq!(names, vec!["orders-prod".to_string()]);
     }
 
     #[test]
-    fn a_missing_key_locks_the_store_and_leaves_the_file_untouched() {
+    fn a_key_already_in_the_keychain_is_used_for_the_first_save() {
         let folder = tempfile::tempdir().unwrap();
         let path = folder.path().join("servers.json");
-        ServerStore::open(path.clone(), vault_with(None)).update(|list| list.upsert_server(server("orders-prod"))).unwrap();
+        let key = Fernet::generate_key();
+        let store = ServerStore::new(path.clone(), vault_with(Some(key.clone())));
+
+        add(&store, "orders-prod").unwrap();
+
+        assert_eq!(saved_key(&store), Some(key.clone()));
+        assert_eq!(server_count(&ServerStore::new(path, vault_with(Some(key)))), 1);
+    }
+
+    #[test]
+    fn a_missing_key_locks_the_store_and_leaves_the_file_untouched() {
+        let (_folder, path, _key) = saved_file();
         let before = fs::read(&path).unwrap();
 
-        let locked = ServerStore::open(path.clone(), vault_with(None));
+        let locked = ServerStore::new(path.clone(), vault_with(None));
 
-        let status = locked.status();
-        assert_eq!(status.status, StoreStatus::Locked);
-        assert!(status.has_saved_file);
-        assert!(matches!(locked.read(|_| Ok(())), Err(CommandError::StoreLocked(_))));
-        assert!(matches!(locked.update(|_| Ok(())), Err(CommandError::StoreLocked(_))));
+        assert_eq!(locked_reason(&locked), "The key for the saved-server file isn't in this system's keychain");
+        assert!(locked.status().has_saved_file);
+        let refused = CommandError::StoreLocked("Saved servers are locked".into());
+        assert_eq!(try_count(&locked), Err(refused.clone()));
+        assert_eq!(add(&locked, "orders-dev"), Err(refused));
         assert_eq!(fs::read(&path).unwrap(), before);
     }
 
     #[test]
     fn a_different_key_locks_the_store() {
+        let (_folder, path, _key) = saved_file();
+
+        let locked = ServerStore::new(path, vault_with(Some(Fernet::generate_key())));
+
+        assert_eq!(locked_reason(&locked), "The saved-server file doesn't match the key in this system's keychain");
+    }
+
+    #[test]
+    fn a_keychain_that_refuses_the_read_locks_an_existing_file() {
+        let (_folder, path, _key) = saved_file();
+
+        let locked = ServerStore::new(path, keychain(Keychain::Refusing));
+
+        assert_eq!(locked_reason(&locked), "The system keychain couldn't be read: denied");
+    }
+
+    #[test]
+    fn without_a_keyring_a_keychain_protected_file_stays_locked() {
+        let (_folder, path, _key) = saved_file();
+
+        let locked = ServerStore::new(path, keychain(Keychain::NoKeyring));
+
+        assert_eq!(locked_reason(&locked), "The system keychain couldn't be read: no secret service");
+    }
+
+    #[test]
+    fn a_keychain_that_refuses_the_write_fails_the_first_save() {
         let folder = tempfile::tempdir().unwrap();
         let path = folder.path().join("servers.json");
-        ServerStore::open(path.clone(), vault_with(None)).update(|list| list.upsert_server(server("orders-prod"))).unwrap();
+        let store = ServerStore::new(path.clone(), keychain(Keychain::Refusing));
 
-        let locked = ServerStore::open(path, vault_with(Some(Fernet::generate_key())));
+        let saved = add(&store, "orders-prod");
 
-        assert_eq!(locked.status().status, StoreStatus::Locked);
+        assert_eq!(saved, Err(CommandError::Storage("Couldn't store the encryption key in the system keychain: denied".into())));
+        assert!(!path.exists());
+        assert_eq!(server_count(&store), 0);
+    }
+
+    #[test]
+    fn an_unreadable_file_locks_the_store() {
+        let folder = tempfile::tempdir().unwrap();
+        let path = folder.path().join("servers.json");
+        fs::create_dir(&path).unwrap();
+
+        let reason = locked_reason(&ServerStore::new(path, vault_with(None)));
+
+        assert!(reason.starts_with("The saved-server file couldn't be read: "), "{reason}");
+    }
+
+    #[test]
+    fn a_file_that_isnt_json_locks_the_store() {
+        let folder = tempfile::tempdir().unwrap();
+        let path = folder.path().join("servers.json");
+        fs::write(&path, "not json").unwrap();
+
+        let reason = locked_reason(&ServerStore::new(path, vault_with(None)));
+
+        assert!(reason.starts_with("The saved-server file isn't in a format Tidewater recognizes: "), "{reason}");
+    }
+
+    #[test]
+    fn a_file_from_a_newer_format_locks_the_store() {
+        let folder = tempfile::tempdir().unwrap();
+        let path = folder.path().join("servers.json");
+        fs::write(&path, r#"{"format":2,"kdf":null,"token":""}"#).unwrap();
+
+        let reason = locked_reason(&ServerStore::new(path, vault_with(None)));
+
+        assert_eq!(reason, "The saved-server file uses format 2, which this version of Tidewater can't read");
     }
 
     #[test]
     fn starting_fresh_sets_the_locked_file_aside_without_deleting_it() {
-        let folder = tempfile::tempdir().unwrap();
-        let path = folder.path().join("servers.json");
-        ServerStore::open(path.clone(), vault_with(None)).update(|list| list.upsert_server(server("orders-prod"))).unwrap();
-        let locked = ServerStore::open(path.clone(), vault_with(None));
+        let (folder, path, _key) = saved_file();
+        let locked = ServerStore::new(path.clone(), vault_with(None));
 
         let status = locked.start_fresh().unwrap();
 
@@ -384,50 +536,169 @@ mod tests {
         assert!(!path.exists());
         let set_aside: Vec<_> = fs::read_dir(folder.path())
             .unwrap()
-            .filter_map(|entry| entry.ok()?.file_name().into_string().ok())
+            .map(|entry| entry.unwrap().file_name().into_string().unwrap())
             .filter(|name| name.starts_with("servers.locked-"))
             .collect();
         assert_eq!(set_aside.len(), 1);
     }
 
     #[test]
+    fn starting_fresh_without_a_file_reopens_the_store() {
+        let folder = tempfile::tempdir().unwrap();
+        let store = ServerStore::new(folder.path().join("servers.json"), keychain(Keychain::NoKeyring));
+        assert_eq!(store.status().status, StoreStatus::NeedsPassphrase);
+
+        assert_eq!(store.start_fresh().unwrap().status, StoreStatus::NeedsPassphrase);
+    }
+
+    #[test]
     fn starting_fresh_is_refused_while_unlocked() {
         let folder = tempfile::tempdir().unwrap();
-        let store = ServerStore::open(folder.path().join("servers.json"), vault_with(None));
-        assert!(matches!(store.start_fresh(), Err(CommandError::Invalid(_))));
+        let store = ServerStore::new(folder.path().join("servers.json"), vault_with(None));
+        assert_eq!(store.start_fresh(), Err(CommandError::Invalid("Saved servers are already unlocked".into())));
+    }
+
+    #[test]
+    fn a_file_that_cant_be_set_aside_is_left_where_it_is() {
+        let (folder, path, _key) = saved_file();
+        let taken = folder.path().join("servers.locked-stamp.json");
+        fs::create_dir(&taken).unwrap();
+        fs::write(taken.join("keep"), "").unwrap();
+        let locked = ServerStore::new(path.clone(), vault_with(None));
+
+        let (kind, message) = parts(locked.start_fresh_as("stamp").unwrap_err());
+
+        assert_eq!(kind, "storage");
+        assert!(message.starts_with("Couldn't set the old file aside: "), "{message}");
+        assert!(path.exists());
+        assert_eq!(locked.status().status, StoreStatus::Locked);
     }
 
     #[test]
     fn without_a_keyring_a_passphrase_creates_then_unlocks_the_file() {
         let folder = tempfile::tempdir().unwrap();
         let path = folder.path().join("servers.json");
-        let store = ServerStore::open(path.clone(), no_keyring());
+        let store = ServerStore::new(path.clone(), keychain(Keychain::NoKeyring));
         assert_eq!(store.status().status, StoreStatus::NeedsPassphrase);
-        assert!(matches!(store.unlock_with_passphrase("short"), Err(CommandError::Invalid(_))));
+        assert_eq!(store.unlock_with_passphrase("short"), Err(CommandError::Invalid("Use at least 8 characters".into())));
 
         store.unlock_with_passphrase("correct horse battery").unwrap();
-        store.update(|list| list.upsert_server(server("orders-prod"))).unwrap();
+        add(&store, "orders-prod").unwrap();
 
-        let reopened = ServerStore::open(path, no_keyring());
+        let reopened = ServerStore::new(path, keychain(Keychain::NoKeyring));
         assert_eq!(reopened.status().status, StoreStatus::NeedsPassphrase);
-        assert!(matches!(reopened.unlock_with_passphrase("wrong passphrase"), Err(CommandError::WrongPassphrase(_))));
+        assert_eq!(
+            reopened.unlock_with_passphrase("wrong passphrase"),
+            Err(CommandError::WrongPassphrase("That passphrase doesn't unlock the saved servers".into()))
+        );
         assert_eq!(reopened.status().status, StoreStatus::NeedsPassphrase);
         reopened.unlock_with_passphrase("correct horse battery").unwrap();
-        assert_eq!(reopened.read(|list| Ok(list.servers.len())).unwrap(), 1);
+        assert_eq!(server_count(&reopened), 1);
+    }
+
+    #[test]
+    fn a_passphrase_is_refused_when_the_store_isnt_waiting_for_one() {
+        let folder = tempfile::tempdir().unwrap();
+        let store = ServerStore::new(folder.path().join("servers.json"), vault_with(None));
+        assert_eq!(
+            store.unlock_with_passphrase("correct horse battery"),
+            Err(CommandError::Invalid("Saved servers aren't waiting for a passphrase".into()))
+        );
+    }
+
+    #[test]
+    fn a_passphrase_is_refused_when_the_file_changed_to_a_keychain_file() {
+        let folder = tempfile::tempdir().unwrap();
+        let path = folder.path().join("servers.json");
+        let waiting = ServerStore::new(path.clone(), keychain(Keychain::NoKeyring));
+        assert_eq!(waiting.status().status, StoreStatus::NeedsPassphrase);
+        add(&ServerStore::new(path, vault_with(None)), "orders-prod").unwrap();
+
+        assert_eq!(
+            waiting.unlock_with_passphrase("correct horse battery"),
+            Err(CommandError::Invalid("The saved-server file isn't passphrase-protected".into()))
+        );
+    }
+
+    #[test]
+    fn a_passphrase_is_refused_when_the_file_became_unreadable() {
+        let folder = tempfile::tempdir().unwrap();
+        let path = folder.path().join("servers.json");
+        let waiting = ServerStore::new(path.clone(), keychain(Keychain::NoKeyring));
+        assert_eq!(waiting.status().status, StoreStatus::NeedsPassphrase);
+        fs::write(&path, "not json").unwrap();
+
+        let (kind, message) = parts(waiting.unlock_with_passphrase("correct horse battery").unwrap_err());
+
+        assert_eq!(kind, "storage");
+        assert!(message.starts_with("The saved-server file isn't in a format Tidewater recognizes: "), "{message}");
+    }
+
+    #[test]
+    fn a_passphrase_file_with_tampered_key_settings_is_refused() {
+        let folder = tempfile::tempdir().unwrap();
+        let path = folder.path().join("servers.json");
+        let store = ServerStore::new(path.clone(), keychain(Keychain::NoKeyring));
+        store.unlock_with_passphrase("correct horse battery").unwrap();
+        add(&store, "orders-prod").unwrap();
+        let mut file = read_file(&path).unwrap().unwrap();
+        file.kdf = Some(kdf("scrypt", "", 0));
+        fs::write(&path, serde_json::to_vec(&file).unwrap()).unwrap();
+
+        let reopened = ServerStore::new(path, keychain(Keychain::NoKeyring));
+
+        assert_eq!(
+            reopened.unlock_with_passphrase("correct horse battery"),
+            Err(CommandError::Storage("The saved-server file's key settings are invalid: unknown algorithm scrypt".into()))
+        );
+    }
+
+    #[test]
+    fn key_settings_with_a_bad_salt_memory_cost_or_salt_length_are_refused() {
+        assert_eq!(invalid_settings(kdf("argon2id", "not base64!", 19_456)), "Invalid symbol 32, offset 3.");
+        assert_eq!(invalid_settings(kdf("argon2id", "c2FsdHNhbHQ=", 0)), "memory cost is too small");
+        assert_eq!(invalid_settings(kdf("argon2id", "AAAA", 19_456)), "salt is too short");
     }
 
     #[test]
     fn a_failed_change_leaves_the_saved_list_as_it_was() {
         let folder = tempfile::tempdir().unwrap();
-        let store = ServerStore::open(folder.path().join("servers.json"), vault_with(None));
-        store.update(|list| list.upsert_server(server("orders-prod"))).unwrap();
+        let store = ServerStore::new(folder.path().join("servers.json"), vault_with(None));
+        add(&store, "orders-prod").unwrap();
 
         let result = store.update(|list| {
             list.servers.clear();
             Err::<(), _>(CommandError::Invalid("rejected".into()))
         });
 
-        assert!(result.is_err());
-        assert_eq!(store.read(|list| Ok(list.servers.len())).unwrap(), 1);
+        assert_eq!(result, Err(CommandError::Invalid("rejected".into())));
+        assert_eq!(add(&store, "  "), Err(CommandError::Invalid("Name is required".into())));
+        assert_eq!(server_count(&store), 1);
+    }
+
+    #[test]
+    fn a_failed_write_leaves_the_saved_list_as_it_was() {
+        let folder = tempfile::tempdir().unwrap();
+        let path = folder.path().join("servers.json");
+        let store = ServerStore::new(path.clone(), vault_with(None));
+        add(&store, "orders-prod").unwrap();
+        fs::create_dir(path.with_extension("json.tmp")).unwrap();
+
+        let (kind, message) = parts(add(&store, "orders-dev").unwrap_err());
+
+        assert_eq!(kind, "storage");
+        assert!(message.starts_with("Couldn't save servers: "), "{message}");
+        assert_eq!(server_count(&store), 1);
+    }
+
+    #[test]
+    fn a_change_that_panics_doesnt_lock_out_later_commands() {
+        let folder = tempfile::tempdir().unwrap();
+        let store = ServerStore::new(folder.path().join("servers.json"), vault_with(None));
+
+        let panicked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| store.update(|_| -> Result<(), CommandError> { panic!("boom") })));
+
+        assert!(panicked.is_err());
+        assert_eq!(store.status().status, StoreStatus::Unlocked);
     }
 }
