@@ -30,7 +30,8 @@ fn manage_state<R: Runtime>(app: &mut App<R>) -> Result<(), Box<dyn std::error::
     app.path()
         .app_config_dir()
         .map(|folder| {
-            app.manage(commands::Store::new(folder.join("servers.json"), servers::vault::OsKeychain));
+            let vault = servers::vault::AppVault::new(&folder, Box::new(servers::vault::OsKeychain));
+            app.manage(commands::Store::new(folder.join("servers.json"), vault));
         })
         .map_err(Into::into)
 }
@@ -51,6 +52,7 @@ fn with_commands<R: Runtime>(builder: Builder<R>) -> Builder<R> {
             commands::parse_connection,
             commands::test_connection,
             commands::connect_server,
+            commands::cancel_connect,
             commands::disconnect_server,
             commands::list_connections,
             commands::catalog_children,
@@ -59,5 +61,7 @@ fn with_commands<R: Runtime>(builder: Builder<R>) -> Builder<R> {
             commands::fetch_more_rows,
             commands::cancel_query,
             commands::close_query_tab,
+            commands::key_storage,
+            commands::set_key_storage,
         ])
 }

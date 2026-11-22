@@ -191,4 +191,45 @@ describe('the server tree', () => {
     await user.keyboard('{ArrowDown}');
     expect(active()).toBeNull();
   });
+
+  it('shows a connecting server with a spinner and its seconds so far, and Escape cancels it', async () => {
+    vi.useFakeTimers({ toFake: ['Date', 'setInterval', 'clearInterval'] });
+    vi.setSystemTime(20_000);
+    useServerStore.setState({ servers: [server()], connections: { 'orders-dev': { status: 'connecting', started: 16_000 } } });
+    useTreeStore.setState({ active_id: serverRowId('orders-dev') });
+    const calls = mockCommands({ cancel_connect: () => null });
+    const { unmount } = renderWithUser(<ServerTree />);
+    const connecting = item(/orders-dev/);
+
+    expect(connecting.textContent).toContain('Connecting… 4 s');
+    expect(connecting.getAttribute('aria-keyshortcuts')).toBe('Escape');
+    act(() => vi.advanceTimersByTime(1_000));
+    expect(connecting.textContent).toContain('Connecting… 5 s');
+    fireEvent.keyDown(tree(), { key: 'Escape' });
+    unmount();
+    vi.useRealTimers();
+
+    expect(calls).toEqual([{ command: 'cancel_connect', args: { id: 'orders-dev' } }]);
+  });
+
+  it('leaves Escape alone on a server that is not connecting', () => {
+    useServerStore.setState({ servers: [server()] });
+    useTreeStore.setState({ active_id: serverRowId('orders-dev') });
+    const calls = mockCommands({});
+    renderWithUser(<ServerTree />);
+
+    fireEvent.keyDown(tree(), { key: 'Escape' });
+
+    expect([calls, item(/orders-dev/).getAttribute('aria-keyshortcuts')]).toEqual([[], null]);
+  });
+
+  it('gives an error row as many lines as its message needs, so none of it is cut off', () => {
+    useServerStore.setState({ servers: [server()], connections: { 'orders-dev': { status: 'failed', message: 'x'.repeat(120) } } });
+    useTreeStore.setState({ expanded: { [serverRowId('orders-dev')]: true } });
+    renderWithUser(<ServerTree />);
+
+    const error = item(/^x+$/);
+
+    expect(error.style.height).toBe(`${5 * 18 + 6}px`);
+  });
 });

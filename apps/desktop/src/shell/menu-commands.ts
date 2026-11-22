@@ -2,6 +2,7 @@ import { isTauri } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
 import { useDialogStore } from '../store/dialogs';
 import { useTreeStore } from '../store/tree';
+import { useSettingsStore } from '../store/settings';
 import { useWorkspaceStore, type WorkspaceView } from '../store/workspace';
 
 const menu_views: Readonly<Record<string, WorkspaceView>> = {
@@ -25,6 +26,10 @@ function applyMenuCommand(id: string): void {
   }
   if (id === 'new_connection') {
     useDialogStore.getState().openConnection(null);
+    return;
+  }
+  if (id === 'open_settings') {
+    void useSettingsStore.getState().open();
     return;
   }
   if (id === 'toggle_sidebar') {

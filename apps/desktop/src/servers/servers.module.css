@@ -427,3 +427,30 @@ select.input {
     background: CanvasText;
   }
 }
+
+.serverProgress {
+  padding: 2px 10px 6px 36px;
+  color: var(--tw-text-muted);
+  font-size: var(--tw-font-size-small);
+}
+
+.elapsed {
+  font-variant-numeric: tabular-nums;
+}
+
+.row[data-kind='error'] {
+  align-items: flex-start;
+  padding-block: 3px;
+  white-space: normal;
+  line-height: 18px;
+}
+
+.row[data-kind='error'] .rowLabel {
+  overflow: visible;
+  overflow-wrap: anywhere;
+  font-size: var(--tw-font-size-small);
+}
+
+.row[data-kind='error'] svg {
+  margin-top: 2px;
+}

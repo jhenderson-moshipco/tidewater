@@ -1,7 +1,19 @@
 import { describe, expect, it } from 'vitest';
 import type { CatalogNode } from '../generated/catalog';
 import type { ServerSummary } from '../generated/servers';
-import { buildRows, childrenKey, groupRowId, keyAction as rowAction, nodeRowId, serverRowId, type TreeInput, type TreeRow } from './tree-rows';
+import {
+  buildRows,
+  childrenKey,
+  groupRowId,
+  keyAction as rowAction,
+  nodeRowId,
+  rowHeight,
+  rowIndexAt,
+  rowLayout,
+  serverRowId,
+  type TreeInput,
+  type TreeRow,
+} from './tree-rows';
 
 /** The action with its row reduced to the row's id, to keep the expectations short. */
 function keyAction(rows: ReadonlyArray<TreeRow>, active_id: string | null, key: string) {
@@ -157,5 +169,28 @@ describe('keyAction', () => {
 
   it('treats an unknown active row as the first row', () => {
     expect(keyAction(rows, 'gone', 'ArrowDown')).toEqual({ type: 'focus', id: serverRowId('dev') });
+  });
+});
+
+describe('row layout', () => {
+  it('wraps an error row to the lines its message needs at the sidebar width, and keeps other rows one line', () => {
+    const base = { id: 'r', parent_id: null, setsize: 1, posinset: 1, expandable: false, expanded: false, chevron_slot: false };
+    const error = (label: string, level = 1): TreeRow => ({ ...base, level, label, item: { type: 'error', message: label, retry_id: 'r' } });
+    const plain: TreeRow = { ...base, level: 1, label: 'x'.repeat(300), item: { type: 'loading' } };
+
+    expect(rowHeight(plain, 272)).toBe(24);
+    expect(rowHeight(error('short'), 272)).toBe(24);
+    expect(rowHeight(error('x'.repeat(60)), 272)).toBe(2 * 18 + 6);
+    expect(rowHeight(error('x'.repeat(60)), 640)).toBe(24);
+    expect(rowHeight(error('x'.repeat(20), 40), 272)).toBe(2 * 18 + 6);
+  });
+
+  it('lays rows out top to bottom and finds the row at any offset', () => {
+    const rows = buildRows(input({ groups: [], servers: [server('a'), server('b')] }));
+    const layout = rowLayout(rows, 272);
+
+    expect(layout).toEqual({ tops: [0, 24], heights: [24, 24], total: 48 });
+    expect([rowIndexAt(layout, 0), rowIndexAt(layout, 30), rowIndexAt(layout, 999)]).toEqual([0, 1, 1]);
+    expect(rowIndexAt(rowLayout([], 272), 10)).toBe(0);
   });
 });

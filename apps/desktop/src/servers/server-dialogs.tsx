@@ -5,6 +5,7 @@ import { useDialogStore } from '../store/dialogs';
 import { useServerStore } from '../store/servers';
 import { useTreeStore } from '../store/tree';
 import { fieldText } from '../utils/forms';
+import { SettingsDialog } from '../shell/settings-dialog';
 import { ConnectionDialog } from './connection-dialog';
 import { Modal, closeDialogOf } from './modal';
 import classes from './servers.module.css';
@@ -134,5 +135,7 @@ export function DialogHost() {
       return <ConfirmDialog model={deleteGroupModel(open.group, open.server_count)} />;
     case 'start-fresh':
       return <ConfirmDialog model={start_fresh_model} />;
+    case 'settings':
+      return <SettingsDialog />;
   }
 }
