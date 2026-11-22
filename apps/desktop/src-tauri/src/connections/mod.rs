@@ -101,14 +101,8 @@ pub fn describe(error: &tokio_postgres::Error) -> String {
     message
 }
 
-enum OpenError {
-    Setup(CommandError),
-    Postgres(tokio_postgres::Error),
-}
-
-async fn open(params: &ConnectParams) -> Result<(Client, JoinHandle<()>), OpenError> {
-    let connector = tls::connector(params.tls).map_err(OpenError::Setup)?;
-    let (client, connection) = build_config(params).connect(connector).await.map_err(OpenError::Postgres)?;
+async fn open(params: &ConnectParams) -> Result<(Client, JoinHandle<()>), tokio_postgres::Error> {
+    let (client, connection) = build_config(params).connect(tls::connector(params.tls)).await?;
     let driver = tauri::async_runtime::spawn(async move {
         let _ = connection.await;
     });
@@ -144,10 +138,7 @@ impl ConnectionManager {
                 return Ok(existing.info.clone());
             }
         }
-        let (client, driver) = open(&params).await.map_err(|error| match error {
-            OpenError::Setup(error) => error,
-            OpenError::Postgres(error) => CommandError::Connection(describe(&error)),
-        })?;
+        let (client, driver) = open(&params).await.map_err(|error| CommandError::Connection(describe(&error)))?;
         let (server_version, encryption) = session_info(&client).await.map_err(|error| {
             driver.abort();
             CommandError::Connection(describe(&error))
@@ -180,31 +171,67 @@ impl ConnectionManager {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::testing::{FakeServer, closed_port, fake_server, live_params};
 
     #[test]
     fn session_options_are_empty_without_defaults() {
         assert_eq!(session_options(&SessionDefaults::default()), "");
     }
 
-    fn live_params() -> Option<ConnectParams> {
-        let url = std::env::var("TIDEWATER_TEST_DATABASE_URL").ok()?;
-        let parsed = url::parse_connection_string(&url).expect("TIDEWATER_TEST_DATABASE_URL should parse");
-        Some(ConnectParams {
-            host: parsed.host.unwrap_or_else(|| "localhost".into()),
-            port: parsed.port.unwrap_or(5432),
-            database: parsed.database.unwrap_or_else(|| "postgres".into()),
-            user: parsed.user.unwrap_or_else(|| "postgres".into()),
-            password: parsed.password,
-            tls: parsed.tls.unwrap_or_default(),
-            session: SessionDefaults::default(),
-        })
+    #[test]
+    fn session_options_set_read_only_and_statement_timeout() {
+        let session = SessionDefaults { read_only: true, statement_timeout_ms: Some(15_000) };
+        assert_eq!(session_options(&session), "-c default_transaction_read_only=on -c statement_timeout=15000");
+    }
+
+    #[tokio::test]
+    async fn a_config_sends_the_password_and_options_only_when_set() {
+        let mut params = closed_port().await;
+        let bare = build_config(&params);
+        assert_eq!((bare.get_password(), bare.get_options()), (None, None));
+        assert_eq!(bare.get_application_name(), Some("Tidewater"));
+
+        params.password = Some("s3cret".into());
+        params.session.read_only = true;
+        let full = build_config(&params);
+
+        assert_eq!(full.get_password(), Some(b"s3cret".as_slice()));
+        assert_eq!(full.get_options(), Some("-c default_transaction_read_only=on"));
+    }
+
+    #[tokio::test]
+    async fn a_refused_connection_describes_the_error_and_its_cause() {
+        let manager = ConnectionManager::default();
+
+        let (kind, message) = crate::testing::parts(manager.connect("server-a", closed_port().await).await.unwrap_err());
+
+        assert_eq!(kind, "connection");
+        assert!(message.starts_with("error connecting to server: "), "{message}");
+        assert!(manager.list().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_session_whose_first_query_fails_is_not_kept() {
+        let manager = ConnectionManager::default();
+
+        let refused = manager.connect("server-a", fake_server(FakeServer::FailFirstQuery).await).await;
+
+        assert_eq!(refused, Err(CommandError::Connection("query failed (from the fake server)".into())));
+        assert!(manager.list().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn disconnecting_a_server_that_isnt_connected_does_nothing() {
+        let manager = ConnectionManager::default();
+        manager.disconnect("server-a").await;
+        assert!(manager.list().await.is_empty());
     }
 
     #[tokio::test]
     #[ignore = "needs TIDEWATER_TEST_DATABASE_URL pointing at a running Postgres"]
     async fn live_connect_lists_and_disconnects() {
         let manager = ConnectionManager::default();
-        let info = manager.connect("server-a", live_params().expect("set TIDEWATER_TEST_DATABASE_URL")).await.unwrap();
+        let info = manager.connect("server-a", live_params()).await.unwrap();
         assert!(!info.server_version.is_empty());
         assert_eq!(manager.list().await, vec![info]);
 
@@ -214,10 +241,41 @@ mod tests {
 
     #[tokio::test]
     #[ignore = "needs TIDEWATER_TEST_DATABASE_URL pointing at a running Postgres"]
+    async fn live_connecting_again_reuses_an_open_session() {
+        let manager = ConnectionManager::default();
+        let first = manager.connect("server-a", live_params()).await.unwrap();
+
+        let second = manager.connect("server-a", live_params()).await.unwrap();
+
+        assert_eq!(second, first);
+        assert_eq!(manager.list().await.len(), 1);
+        manager.disconnect("server-a").await;
+    }
+
+    #[tokio::test]
+    #[ignore = "needs TIDEWATER_TEST_DATABASE_URL pointing at a running Postgres"]
+    async fn live_connecting_again_replaces_a_session_the_server_closed() {
+        let manager = ConnectionManager::default();
+        manager.connect("server-a", live_params()).await.unwrap();
+        let pid: i32 = manager.live.lock().await["server-a"].client.query_one("SELECT pg_backend_pid()", &[]).await.unwrap().get(0);
+        let (admin, admin_driver) = open(&live_params()).await.unwrap();
+        admin.execute("SELECT pg_terminate_backend($1)", &[&pid]).await.unwrap();
+        (&mut manager.live.lock().await.get_mut("server-a").unwrap().driver).await.unwrap();
+        assert!(manager.list().await.is_empty());
+
+        manager.connect("server-a", live_params()).await.unwrap();
+
+        assert_eq!(manager.list().await.len(), 1);
+        manager.disconnect("server-a").await;
+        admin_driver.abort();
+    }
+
+    #[tokio::test]
+    #[ignore = "needs TIDEWATER_TEST_DATABASE_URL pointing at a running Postgres"]
     async fn live_session_defaults_reach_the_server() {
-        let mut params = live_params().expect("set TIDEWATER_TEST_DATABASE_URL");
+        let mut params = live_params();
         params.session = SessionDefaults { read_only: true, statement_timeout_ms: Some(15_000) };
-        let Ok((client, driver)) = open(&params).await else { panic!("couldn't connect") };
+        let (client, driver) = open(&params).await.unwrap();
         let row = client
             .query_one("SELECT current_setting('default_transaction_read_only'), current_setting('statement_timeout')", &[])
             .await
@@ -225,11 +283,5 @@ mod tests {
         assert_eq!(row.get::<_, String>(0), "on");
         assert_eq!(row.get::<_, String>(1), "15s");
         driver.abort();
-    }
-
-    #[test]
-    fn session_options_set_read_only_and_statement_timeout() {
-        let session = SessionDefaults { read_only: true, statement_timeout_ms: Some(15_000) };
-        assert_eq!(session_options(&session), "-c default_transaction_read_only=on -c statement_timeout=15000");
     }
 }

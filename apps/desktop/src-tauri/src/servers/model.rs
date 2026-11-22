@@ -282,6 +282,14 @@ mod tests {
         }
     }
 
+    fn invalid(message: &str) -> CommandError {
+        CommandError::Invalid(message.into())
+    }
+
+    fn not_found(message: &str) -> CommandError {
+        CommandError::NotFound(message.into())
+    }
+
     #[test]
     fn new_servers_default_to_prefer_tls() {
         assert_eq!(TlsMode::default(), TlsMode::Prefer);
@@ -294,6 +302,15 @@ mod tests {
         assert!(summary.has_password);
         let json = serde_json::to_string(&list.view()).unwrap();
         assert!(!json.contains("first"));
+    }
+
+    #[test]
+    fn required_text_is_trimmed() {
+        let mut list = ServerList::default();
+        let mut padded = input("  orders-dev  ");
+        padded.host = " db.internal ".into();
+        let summary = list.upsert_server(padded).unwrap();
+        assert_eq!((summary.name.as_str(), summary.host.as_str()), ("orders-dev", "db.internal"));
     }
 
     #[test]
@@ -313,16 +330,76 @@ mod tests {
     }
 
     #[test]
-    fn rejects_blank_required_fields_port_zero_and_unknown_groups() {
+    fn keep_on_a_new_server_means_no_password() {
         let mut list = ServerList::default();
-        let mut blank = input("  ");
-        assert!(matches!(list.upsert_server(blank.clone()), Err(CommandError::Invalid(_))));
-        blank.name = "ok".into();
-        blank.port = 0;
-        assert!(matches!(list.upsert_server(blank.clone()), Err(CommandError::Invalid(_))));
-        blank.port = 5432;
-        blank.group_id = Some("missing".into());
-        assert!(matches!(list.upsert_server(blank), Err(CommandError::NotFound(_))));
+        let mut new = input("orders-dev");
+        new.password = PasswordChange::Keep;
+        assert!(!list.upsert_server(new).unwrap().has_password);
+    }
+
+    #[test]
+    fn rejects_each_blank_required_field_and_port_zero() {
+        let mut list = ServerList::default();
+        let blank = |change: fn(&mut ServerInput)| {
+            let mut server = input("orders-dev");
+            change(&mut server);
+            server
+        };
+        assert_eq!(list.upsert_server(blank(|s| s.name = "  ".into())), Err(invalid("Name is required")));
+        assert_eq!(list.upsert_server(blank(|s| s.host = "".into())), Err(invalid("Host is required")));
+        assert_eq!(list.upsert_server(blank(|s| s.database = " ".into())), Err(invalid("Database is required")));
+        assert_eq!(list.upsert_server(blank(|s| s.user = "".into())), Err(invalid("User is required")));
+        assert_eq!(list.upsert_server(blank(|s| s.port = 0)), Err(invalid("Port must be between 1 and 65535")));
+        assert!(list.servers.is_empty());
+    }
+
+    #[test]
+    fn rejects_a_server_in_an_unknown_group() {
+        let mut list = ServerList::default();
+        list.upsert_group(GroupInput { id: None, name: "Orders platform".into() }).unwrap();
+        let mut grouped = input("orders-prod");
+        grouped.group_id = Some("missing".into());
+        assert_eq!(list.upsert_server(grouped), Err(not_found("No group with id missing")));
+    }
+
+    #[test]
+    fn editing_an_unknown_server_is_not_found() {
+        let mut list = ServerList::default();
+        let mut edit = input("ghost");
+        edit.id = Some("missing".into());
+        assert_eq!(list.upsert_server(edit.clone()), Err(not_found("No saved server with id missing")));
+        edit.password = PasswordChange::Keep;
+        assert_eq!(list.upsert_server(edit), Err(not_found("No saved server with id missing")));
+        assert_eq!(list.find("missing"), Err(not_found("No saved server with id missing")));
+    }
+
+    #[test]
+    fn deleting_a_server_removes_only_that_server() {
+        let mut list = ServerList::default();
+        let kept = list.upsert_server(input("orders-dev")).unwrap().id;
+        let removed = list.upsert_server(input("orders-prod")).unwrap().id;
+
+        list.delete_server(&removed).unwrap();
+
+        assert_eq!(list.servers.iter().map(|server| server.id.clone()).collect::<Vec<_>>(), vec![kept]);
+        assert_eq!(list.delete_server(&removed), Err(not_found(&format!("No saved server with id {removed}"))));
+    }
+
+    #[test]
+    fn groups_are_created_renamed_and_validated() {
+        let mut list = ServerList::default();
+        let group = list.upsert_group(GroupInput { id: None, name: " Orders ".into() }).unwrap();
+        assert_eq!(group.name, "Orders");
+
+        let renamed = list.upsert_group(GroupInput { id: Some(group.id.clone()), name: "Orders platform".into() }).unwrap();
+
+        assert_eq!(renamed, ServerGroup { id: group.id, name: "Orders platform".into() });
+        assert_eq!(list.groups, vec![renamed]);
+        assert_eq!(list.upsert_group(GroupInput { id: None, name: "".into() }), Err(invalid("Group name is required")));
+        assert_eq!(
+            list.upsert_group(GroupInput { id: Some("missing".into()), name: "Billing".into() }),
+            Err(not_found("No group with id missing"))
+        );
     }
 
     #[test]
@@ -332,19 +409,13 @@ mod tests {
         let mut grouped = input("orders-prod");
         grouped.group_id = Some(group.id.clone());
         let server_id = list.upsert_server(grouped).unwrap().id;
+        let ungrouped_id = list.upsert_server(input("orders-dev")).unwrap().id;
 
         list.delete_group(&group.id).unwrap();
 
         assert!(list.groups.is_empty());
         assert_eq!(list.find(&server_id).unwrap().group_id, None);
-    }
-
-    #[test]
-    fn editing_or_deleting_an_unknown_server_is_not_found() {
-        let mut list = ServerList::default();
-        let mut edit = input("ghost");
-        edit.id = Some("missing".into());
-        assert!(matches!(list.upsert_server(edit), Err(CommandError::NotFound(_))));
-        assert!(matches!(list.delete_server("missing"), Err(CommandError::NotFound(_))));
+        assert_eq!(list.find(&ungrouped_id).unwrap().group_id, None);
+        assert_eq!(list.delete_group(&group.id), Err(not_found(&format!("No group with id {}", group.id))));
     }
 }

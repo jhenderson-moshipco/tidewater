@@ -94,3 +94,160 @@ pub async fn disconnect_server(connections: State<'_, ConnectionManager>, id: St
 pub async fn list_connections(connections: State<'_, ConnectionManager>) -> Result<Vec<ConnectionInfo>, CommandError> {
     Ok(connections.list().await)
 }
+
+#[cfg(test)]
+mod tests {
+    use serde_json::{Value, json};
+    use tauri::ipc::{CallbackFn, InvokeBody};
+    use tauri::test::{INVOKE_KEY, MockRuntime, get_ipc_response, mock_builder, mock_context, noop_assets};
+    use tauri::webview::InvokeRequest;
+    use tauri::{App, WebviewWindow, WebviewWindowBuilder};
+
+    use super::*;
+    use crate::testing::{closed_port, mock_keychain};
+
+    #[cfg(windows)]
+    const APP_URL: &str = "http://tauri.localhost";
+    #[cfg(not(windows))]
+    const APP_URL: &str = "tauri://localhost";
+
+    struct TestApp {
+        _app: App<MockRuntime>,
+        window: WebviewWindow<MockRuntime>,
+        _folder: tempfile::TempDir,
+    }
+
+    fn with_window(app: App<MockRuntime>, folder: tempfile::TempDir) -> TestApp {
+        let window = WebviewWindowBuilder::new(&app, "main", Default::default()).build().unwrap();
+        TestApp { _app: app, window, _folder: folder }
+    }
+
+    /// The real app on Tauri's mock runtime, with its saved servers in a temporary folder.
+    fn test_app() -> TestApp {
+        mock_keychain();
+        let folder = tempfile::tempdir().unwrap();
+        let store = Store::new(folder.path().join("servers.json"), OsKeychain);
+        let mut app = crate::with_commands(mock_builder().manage(store)).build(mock_context(noop_assets())).unwrap();
+        crate::manage_state(&mut app).unwrap();
+        with_window(app, folder)
+    }
+
+    impl TestApp {
+        fn invoke(&self, command: &str, args: Value) -> Result<Value, Value> {
+            let request = InvokeRequest {
+                cmd: command.into(),
+                callback: CallbackFn(0),
+                error: CallbackFn(1),
+                url: APP_URL.parse().unwrap(),
+                body: InvokeBody::Json(args),
+                headers: Default::default(),
+                invoke_key: INVOKE_KEY.to_string(),
+            };
+            get_ipc_response(&self.window, request).map(|body| body.deserialize::<Value>().unwrap())
+        }
+    }
+
+    fn server_input(id: Option<&str>, port: u16, password: Value) -> Value {
+        json!({
+            "id": id,
+            "name": "orders-dev",
+            "group_id": null,
+            "environment": "dev",
+            "host": "127.0.0.1",
+            "port": port,
+            "database": "postgres",
+            "user": "tidewater",
+            "password": password,
+            "tls": "disable",
+            "session": { "read_only": false, "statement_timeout_ms": null },
+        })
+    }
+
+    fn kind(error: Value) -> String {
+        error["kind"].as_str().unwrap().to_string()
+    }
+
+    #[test]
+    fn servers_and_groups_are_saved_listed_and_deleted() {
+        let app = test_app();
+        assert_eq!(app.invoke("store_status", json!({})), Ok(json!({ "status": "unlocked", "has_saved_file": false, "reason": null })));
+
+        let group = app.invoke("save_group", json!({ "input": { "id": null, "name": "Orders" } })).unwrap();
+        let server = app.invoke("save_server", json!({ "input": server_input(None, 5432, json!({ "action": "keep" })) })).unwrap();
+        let listed = app.invoke("list_servers", json!({})).unwrap();
+        assert_eq!((listed["groups"].as_array().unwrap().len(), listed["servers"].as_array().unwrap().len()), (1, 1));
+
+        assert_eq!(app.invoke("delete_group", json!({ "id": group["id"] })), Ok(Value::Null));
+        assert_eq!(app.invoke("delete_server", json!({ "id": server["id"] })), Ok(Value::Null));
+        assert_eq!(app.invoke("delete_server", json!({ "id": server["id"] })).map_err(kind), Err("not_found".into()));
+    }
+
+    #[test]
+    fn unlocking_and_starting_fresh_are_refused_while_unlocked() {
+        let app = test_app();
+        assert_eq!(app.invoke("unlock_store", json!({ "passphrase": "correct horse battery" })).map_err(kind), Err("invalid".into()));
+        assert_eq!(app.invoke("start_fresh_store", json!({})).map_err(kind), Err("invalid".into()));
+    }
+
+    fn refusal(app: &TestApp, command: &str) -> String {
+        app.invoke(command, json!({})).unwrap_err().as_str().unwrap().to_string()
+    }
+
+    #[test]
+    fn requests_a_command_cant_read_are_refused_without_running_it() {
+        let no_state = with_window(crate::with_commands(mock_builder()).build(mock_context(noop_assets())).unwrap(), tempfile::tempdir().unwrap());
+        let folder = tempfile::tempdir().unwrap();
+        let store_only = mock_builder().manage(Store::new(folder.path().join("servers.json"), OsKeychain));
+        let store_only = with_window(crate::with_commands(store_only).build(mock_context(noop_assets())).unwrap(), folder);
+        let app = test_app();
+        let with_arguments = [
+            "unlock_store", "save_server", "delete_server", "save_group", "delete_group", "test_connection", "connect_server",
+            "disconnect_server",
+        ];
+
+        for command in ["store_status", "start_fresh_store", "list_servers", "list_connections"].iter().chain(&with_arguments) {
+            assert!(refusal(&no_state, command).starts_with("state not managed"), "{command}");
+        }
+        for command in ["delete_server", "connect_server"] {
+            assert!(refusal(&store_only, command).starts_with("state not managed for field `connections`"), "{command}");
+        }
+        for command in with_arguments {
+            assert!(refusal(&app, command).contains("missing required key"), "{command}");
+        }
+        assert_eq!(app.invoke("list_servers", json!({})), Ok(json!({ "groups": [], "servers": [] })));
+    }
+    #[test]
+    fn a_pasted_connection_string_is_parsed() {
+        let app = test_app();
+        let parsed = app.invoke("parse_connection", json!({ "input": "postgres://app@db.internal/orders" })).unwrap();
+        assert_eq!((parsed["host"].as_str(), parsed["user"].as_str()), (Some("db.internal"), Some("app")));
+        assert_eq!(app.invoke("parse_connection", json!({ "input": "" })).map_err(kind), Err("invalid".into()));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn testing_a_connection_resolves_each_kind_of_password_change() {
+        let app = test_app();
+        let port = closed_port().await.port;
+        let saved = app.invoke("save_server", json!({ "input": server_input(None, port, json!({ "action": "set", "value": "pw" })) })).unwrap();
+        let id = saved["id"].as_str().unwrap();
+
+        for password in [json!({ "action": "set", "value": "pw" }), json!({ "action": "clear" }), json!({ "action": "keep" })] {
+            let steps = app.invoke("test_connection", json!({ "input": server_input(Some(id), port, password) })).unwrap();
+            assert_eq!(steps[1]["outcome"], "failed");
+        }
+        let unknown = server_input(Some("missing"), port, json!({ "action": "keep" }));
+        assert_eq!(app.invoke("test_connection", json!({ "input": unknown })).map_err(kind), Err("not_found".into()));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn connecting_reports_unknown_and_unreachable_servers() {
+        let app = test_app();
+        let port = closed_port().await.port;
+        let saved = app.invoke("save_server", json!({ "input": server_input(None, port, json!({ "action": "clear" })) })).unwrap();
+
+        assert_eq!(app.invoke("connect_server", json!({ "id": "missing" })).map_err(kind), Err("not_found".into()));
+        assert_eq!(app.invoke("connect_server", json!({ "id": saved["id"] })).map_err(kind), Err("connection".into()));
+        assert_eq!(app.invoke("disconnect_server", json!({ "id": saved["id"] })), Ok(Value::Null));
+        assert_eq!(app.invoke("list_connections", json!({})), Ok(json!([])));
+    }
+}

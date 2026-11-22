@@ -1,6 +1,6 @@
 //! The native application menu
 
-use tauri::menu::{AboutMetadata, Menu, MenuEvent, MenuItem, PredefinedMenuItem, Submenu};
+use tauri::menu::{AboutMetadata, IsMenuItem, Menu, MenuEvent, MenuItem, MenuItemKind, PredefinedMenuItem, Submenu};
 use tauri::{AppHandle, Emitter, Runtime};
 
 /// these id's get forwarded to the frontend
@@ -17,11 +17,20 @@ const FORWARDED: [&str; 7] = [
 enum Entry {
     Action(&'static str, &'static str, Option<&'static str>),
     Planned(&'static str, Option<&'static str>),
+    System(SystemItem),
+}
+
+enum SystemItem {
     Separator,
+    #[cfg(target_os = "macos")]
     About,
+    #[cfg(target_os = "macos")]
     Services,
+    #[cfg(target_os = "macos")]
     Hide,
+    #[cfg(target_os = "macos")]
     HideOthers,
+    #[cfg(target_os = "macos")]
     ShowAll,
     Quit,
     CloseWindow,
@@ -37,61 +46,65 @@ enum Entry {
 }
 
 use Entry::*;
+use SystemItem::*;
 
+#[cfg(target_os = "macos")]
 const APP_MENU: &[Entry] = &[
-    About,
-    Separator,
+    System(About),
+    System(Separator),
     Planned("Settings…", Some("CmdOrCtrl+,")),
-    Separator,
-    Services,
-    Separator,
-    Hide,
-    HideOthers,
-    ShowAll,
-    Separator,
-    Quit,
+    System(Separator),
+    System(Services),
+    System(Separator),
+    System(Hide),
+    System(HideOthers),
+    System(ShowAll),
+    System(Separator),
+    System(Quit),
 ];
 
 const FILE_MENU: &[Entry] = &[
     Planned("New Query Tab", Some("CmdOrCtrl+T")),
     Action("new_connection", "New Connection…", Some("CmdOrCtrl+Shift+N")),
-    Separator,
+    System(Separator),
     Planned("Open .sql File…", Some("CmdOrCtrl+O")),
     Planned("Save", Some("CmdOrCtrl+S")),
     Planned("Save As…", Some("CmdOrCtrl+Shift+S")),
-    Separator,
+    System(Separator),
     Planned("Import Settings…", None),
     Planned("Export Settings…", None),
-    Separator,
-    CloseWindow,
+    System(Separator),
+    System(CloseWindow),
+    #[cfg(not(target_os = "macos"))]
+    System(Quit),
 ];
 
 const EDIT_MENU: &[Entry] = &[
-    Undo,
-    Redo,
-    Separator,
-    Cut,
-    Copy,
-    Paste,
-    SelectAll,
-    Separator,
+    System(Undo),
+    System(Redo),
+    System(Separator),
+    System(Cut),
+    System(Copy),
+    System(Paste),
+    System(SelectAll),
+    System(Separator),
     Planned("Find", Some("CmdOrCtrl+F")),
     Planned("Format SQL", Some("Alt+Shift+F")),
 ];
 
 const VIEW_MENU: &[Entry] = &[
     Planned("Command Palette", Some("CmdOrCtrl+K")),
-    Separator,
+    System(Separator),
     Action("view_explorer", "Explorer", Some("CmdOrCtrl+Shift+E")),
     Action("view_search", "Search", Some("CmdOrCtrl+Shift+F")),
     Action("view_files", "Saved Queries", None),
     Action("view_history", "History", None),
     Action("view_performance", "Performance", Some("CmdOrCtrl+Shift+M")),
-    Separator,
+    System(Separator),
     Action("toggle_sidebar", "Toggle Sidebar", Some("CmdOrCtrl+B")),
     Planned("Edit Layout…", None),
-    Separator,
-    Fullscreen,
+    System(Separator),
+    System(Fullscreen),
 ];
 
 const QUERY_MENU: &[Entry] = &[
@@ -99,10 +112,10 @@ const QUERY_MENU: &[Entry] = &[
     Planned("Run All", Some("CmdOrCtrl+Shift+Enter")),
     Planned("Run Across Group…", Some("CmdOrCtrl+Alt+Enter")),
     Planned("Cancel", Some("CmdOrCtrl+.")),
-    Separator,
+    System(Separator),
     Planned("Explain", Some("CmdOrCtrl+E")),
     Planned("Explain Analyze", Some("CmdOrCtrl+Alt+E")),
-    Separator,
+    System(Separator),
     Planned("Begin Transaction", None),
     Planned("Commit", Some("CmdOrCtrl+Shift+C")),
     Planned("Rollback", Some("CmdOrCtrl+Shift+R")),
@@ -112,90 +125,142 @@ const SERVER_MENU: &[Entry] = &[
     Planned("Connect", None),
     Planned("Disconnect", None),
     Planned("Connect Whole Group", None),
-    Separator,
+    System(Separator),
     Planned("New Database…", None),
     Planned("New Schema…", None),
     Planned("Roles and Privileges", None),
-    Separator,
+    System(Separator),
     Planned("Back Up with pg_dump…", None),
     Planned("Restore…", None),
 ];
 
 const TOOLS_MENU: &[Entry] = &[
     Planned("Sessions and Locks", None),
-    Separator,
+    System(Separator),
     Planned("Import CSV…", None),
     Planned("Export Results…", None),
     Planned("Vacuum and Analyze…", None),
-    Separator,
+    System(Separator),
     Planned("Keybindings", None),
 ];
 
-const WINDOW_MENU: &[Entry] = &[Minimize, Maximize];
+const WINDOW_MENU: &[Entry] = &[System(Minimize), System(Maximize)];
 
 const HELP_MENU: &[Entry] = &[
     Planned("Documentation", None),
     Planned("Keyboard Shortcuts", None),
-    Separator,
+    System(Separator),
     Planned("Report an Issue", None),
 ];
 
-fn submenu<R: Runtime>(app: &AppHandle<R>, title: &str, entries: &[Entry]) -> tauri::Result<Submenu<R>> {
-    let submenu = Submenu::new(app, title, true)?;
-    for entry in entries {
-        match entry {
-            Action(id, label, accelerator) => submenu.append(&MenuItem::with_id(app, *id, label, true, *accelerator)?)?,
-            Planned(label, accelerator) => submenu.append(&MenuItem::new(app, label, false, *accelerator)?)?,
-            Separator => submenu.append(&PredefinedMenuItem::separator(app)?)?,
-            About => submenu.append(&PredefinedMenuItem::about(app, None, Some(AboutMetadata::default()))?)?,
-            Services => submenu.append(&PredefinedMenuItem::services(app, None)?)?,
-            Hide => submenu.append(&PredefinedMenuItem::hide(app, None)?)?,
-            HideOthers => submenu.append(&PredefinedMenuItem::hide_others(app, None)?)?,
-            ShowAll => submenu.append(&PredefinedMenuItem::show_all(app, None)?)?,
-            Quit => submenu.append(&PredefinedMenuItem::quit(app, None)?)?,
-            CloseWindow => submenu.append(&PredefinedMenuItem::close_window(app, None)?)?,
-            Undo => submenu.append(&PredefinedMenuItem::undo(app, None)?)?,
-            Redo => submenu.append(&PredefinedMenuItem::redo(app, None)?)?,
-            Cut => submenu.append(&PredefinedMenuItem::cut(app, None)?)?,
-            Copy => submenu.append(&PredefinedMenuItem::copy(app, None)?)?,
-            Paste => submenu.append(&PredefinedMenuItem::paste(app, None)?)?,
-            SelectAll => submenu.append(&PredefinedMenuItem::select_all(app, None)?)?,
-            Minimize => submenu.append(&PredefinedMenuItem::minimize(app, None)?)?,
-            Maximize => submenu.append(&PredefinedMenuItem::maximize(app, None)?)?,
-            Fullscreen => submenu.append(&PredefinedMenuItem::fullscreen(app, None)?)?,
-        }
+const MENUS: &[(&str, &[Entry])] = &[
+    #[cfg(target_os = "macos")]
+    ("Tidewater", APP_MENU),
+    ("File", FILE_MENU),
+    ("Edit", EDIT_MENU),
+    ("View", VIEW_MENU),
+    ("Query", QUERY_MENU),
+    ("Server", SERVER_MENU),
+    ("Tools", TOOLS_MENU),
+    ("Window", WINDOW_MENU),
+    ("Help", HELP_MENU),
+];
+
+fn system_item<R: Runtime>(app: &AppHandle<R>, item: &SystemItem) -> tauri::Result<PredefinedMenuItem<R>> {
+    match item {
+        Separator => PredefinedMenuItem::separator(app),
+        #[cfg(target_os = "macos")]
+        About => PredefinedMenuItem::about(app, None, Some(AboutMetadata::default())),
+        #[cfg(target_os = "macos")]
+        Services => PredefinedMenuItem::services(app, None),
+        #[cfg(target_os = "macos")]
+        Hide => PredefinedMenuItem::hide(app, None),
+        #[cfg(target_os = "macos")]
+        HideOthers => PredefinedMenuItem::hide_others(app, None),
+        #[cfg(target_os = "macos")]
+        ShowAll => PredefinedMenuItem::show_all(app, None),
+        Quit => PredefinedMenuItem::quit(app, None),
+        CloseWindow => PredefinedMenuItem::close_window(app, None),
+        Undo => PredefinedMenuItem::undo(app, None),
+        Redo => PredefinedMenuItem::redo(app, None),
+        Cut => PredefinedMenuItem::cut(app, None),
+        Copy => PredefinedMenuItem::copy(app, None),
+        Paste => PredefinedMenuItem::paste(app, None),
+        SelectAll => PredefinedMenuItem::select_all(app, None),
+        Minimize => PredefinedMenuItem::minimize(app, None),
+        Maximize => PredefinedMenuItem::maximize(app, None),
+        Fullscreen => PredefinedMenuItem::fullscreen(app, None),
     }
-    Ok(submenu)
+}
+
+fn item<R: Runtime>(app: &AppHandle<R>, entry: &Entry) -> tauri::Result<MenuItemKind<R>> {
+    match entry {
+        Action(id, label, accelerator) => MenuItem::with_id(app, *id, label, true, *accelerator).map(MenuItemKind::MenuItem),
+        Planned(label, accelerator) => MenuItem::new(app, label, false, *accelerator).map(MenuItemKind::MenuItem),
+        System(system) => system_item(app, system).map(MenuItemKind::Predefined),
+    }
+}
+
+fn as_items<R: Runtime, I: IsMenuItem<R>>(items: &[I]) -> Vec<&dyn IsMenuItem<R>> {
+    items.iter().map(|item| item as &dyn IsMenuItem<R>).collect()
+}
+
+fn submenu<R: Runtime>(app: &AppHandle<R>, title: &str, entries: &[Entry]) -> tauri::Result<Submenu<R>> {
+    entries
+        .iter()
+        .map(|entry| item(app, entry))
+        .collect::<tauri::Result<Vec<_>>>()
+        .and_then(|items| Submenu::with_items(app, title, true, &as_items(&items)))
 }
 
 /// builds the menu for the client to consume
 pub fn build<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<Menu<R>> {
-    let menu = Menu::new(app)?;
-    if cfg!(target_os = "macos") {
-        menu.append(&submenu(app, "Tidewater", APP_MENU)?)?;
-    }
-    let file = submenu(app, "File", FILE_MENU)?;
-    if !cfg!(target_os = "macos") {
-        file.append(&PredefinedMenuItem::quit(app, None)?)?;
-    }
-    menu.append(&file)?;
-    menu.append(&submenu(app, "Edit", EDIT_MENU)?)?;
-    menu.append(&submenu(app, "View", VIEW_MENU)?)?;
-    menu.append(&submenu(app, "Query", QUERY_MENU)?)?;
-    menu.append(&submenu(app, "Server", SERVER_MENU)?)?;
-    menu.append(&submenu(app, "Tools", TOOLS_MENU)?)?;
-    menu.append(&submenu(app, "Window", WINDOW_MENU)?)?;
-    menu.append(&submenu(app, "Help", HELP_MENU)?)?;
-    Ok(menu)
+    MENUS
+        .iter()
+        .map(|(title, entries)| submenu(app, title, entries))
+        .collect::<tauri::Result<Vec<_>>>()
+        .and_then(|submenus| Menu::with_items(app, &as_items(&submenus)))
 }
 
 /// forwards events to the client
 pub fn forward<R: Runtime>(app: &AppHandle<R>, event: MenuEvent) {
     let id = event.id().as_ref();
-    if !FORWARDED.contains(&id) {
-        return;
+    if FORWARDED.contains(&id) {
+        let _ = app.emit("menu", id);
     }
-    if let Err(error) = app.emit("menu", id) {
-        eprintln!("could not forward menu command {id}: {error}");
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::mpsc;
+
+    use tauri::Listener;
+
+    use super::*;
+
+    #[cfg(not(target_os = "macos"))]
+    #[test]
+    fn only_the_forwarded_commands_are_enabled() {
+        let app = crate::app(tauri::test::mock_builder()).build(tauri::test::mock_context(tauri::test::noop_assets())).unwrap();
+        let mut enabled = Vec::new();
+        for submenu in app.menu().unwrap().items().unwrap() {
+            let items = submenu.as_submenu().unwrap().items().unwrap();
+            let menu_items = items.iter().filter_map(MenuItemKind::as_menuitem);
+            enabled.extend(menu_items.filter(|item| item.is_enabled().unwrap()).map(|item| item.id().0.clone()));
+        }
+        assert_eq!(enabled, FORWARDED.to_vec());
+    }
+
+    #[test]
+    fn forwarded_commands_reach_the_frontend_and_others_dont() {
+        let app = tauri::test::mock_app();
+        let (sender, received) = mpsc::channel();
+        app.listen_any("menu", move |event| sender.send(event.payload().to_string()).unwrap());
+
+        forward(app.handle(), MenuEvent { id: "settings".into() });
+        forward(app.handle(), MenuEvent { id: "view_search".into() });
+
+        assert_eq!(received.recv().unwrap(), "\"view_search\"");
+        assert!(received.try_recv().is_err());
     }
 }

@@ -3,7 +3,7 @@
 use serde::Serialize;
 use ts_rs::TS;
 
-#[derive(Debug, thiserror::Error, Serialize, TS)]
+#[derive(Clone, Debug, PartialEq, Eq, thiserror::Error, Serialize, TS)]
 #[serde(tag = "kind", content = "message", rename_all = "snake_case")]
 #[ts(export, export_to = "errors.ts")]
 pub enum CommandError {
