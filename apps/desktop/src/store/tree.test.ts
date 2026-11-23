@@ -222,7 +222,7 @@ describe('system objects', () => {
     await vi.waitFor(() => expect(calls).toHaveLength(1));
     expect(calls[0].args).toEqual({ server_id: 'orders-dev', path: orders_path, show_system: true });
     expect(tree().announcement).toBe('Showing system objects');
-    expect(JSON.parse(localStorage.getItem('tidewater-tree') ?? '{}').state).toEqual({ show_system: true });
+    expect(JSON.parse(localStorage.getItem('tidewater-tree') ?? '{}').state).toMatchObject({ show_system: true });
 
     tree().toggleSystem();
     expect(tree().announcement).toBe('Hiding system objects');
@@ -242,3 +242,65 @@ describe('forgetting a server', () => {
     expect(tree().children).toEqual({ [childrenKey('billing')]: { status: 'loading', path: null } });
   });
 });
+
+describe('reopening servers at launch', () => {
+  const second = serverRowId('billing');
+
+  function saved() {
+    useServerStore.setState({ store: { status: 'unlocked', has_saved_file: true, reason: null }, servers: [server(), server({ id: 'billing', name: 'billing', database: 'billing' })] });
+  }
+
+  it('remembers a server once it connects through the tree, and forgets it when it fails, is cancelled or is closed', async () => {
+    useServerStore.setState({ servers: [server()] });
+    const answers = [() => info, () => failWith('connection', 'refused')];
+    mockCommands({ connect_server: () => (answers.shift() as () => unknown)(), catalog_children: catalogAnswers });
+
+    await tree().expandRow(rowWithId(server_row));
+    expect(tree().open_servers).toEqual(['orders-dev']);
+    expect(JSON.parse(localStorage.getItem('tidewater-tree') ?? '{}').state).toMatchObject({ open_servers: ['orders-dev'], expanded: { [server_row]: true } });
+
+    useServerStore.setState({ connections: {} });
+    await tree().expandRow(rowWithId(server_row));
+    expect(tree().open_servers).toEqual([]);
+
+    useTreeStore.setState({ open_servers: ['orders-dev', 'billing'] });
+    tree().forgetServer('orders-dev');
+    expect(tree().open_servers).toEqual(['billing']);
+  });
+
+  it('reconnects the servers open at the last quit, reopening the expanded ones row by row and only connecting the rest', async () => {
+    saved();
+    useTreeStore.setState({
+      open_servers: ['orders-dev', 'billing'],
+      expanded: { [server_row]: true, [orders_row]: true, [nodeRowId('orders-dev', 'db:orders/schema:2200')]: true },
+      children: { [childrenKey('orders-dev', 'db:postgres')]: { status: 'failed', path: null, message: 'permission denied' } },
+    });
+    const calls = mockCommands({ connect_server: () => info, catalog_children: catalogAnswers });
+
+    await tree().reopen();
+
+    expect(commandsOf(calls).filter((command) => command === 'connect_server')).toHaveLength(2);
+    expect(calls.filter((call) => call.command === 'catalog_children').map((call) => call.args)).toEqual([
+      { server_id: 'orders-dev', path: null, show_system: false },
+      { server_id: 'orders-dev', path: orders_path, show_system: false },
+      { server_id: 'orders-dev', path: schemas[0]!.children, show_system: false },
+    ]);
+    expect(useServerStore.getState().connections.billing).toEqual({ status: 'connected', info });
+    expect(tree().expanded[second]).toBeUndefined();
+  });
+
+  it('drops servers that were deleted, and their rows, and reconnects nothing while saved servers are locked', async () => {
+    saved();
+    useTreeStore.setState({ open_servers: ['gone'], expanded: { [serverRowId('gone')]: true, 'group:orders': true } });
+    const calls = mockCommands({});
+
+    await tree().reopen();
+    expect([tree().open_servers, tree().expanded, calls]).toEqual([[], { 'group:orders': true }, []]);
+
+    useServerStore.setState({ store: { status: 'needs_passphrase', has_saved_file: true, reason: null } });
+    useTreeStore.setState({ open_servers: ['orders-dev'] });
+    await tree().reopen();
+    expect(calls).toEqual([]);
+  });
+});
+

@@ -454,3 +454,7 @@ select.input {
 .row[data-kind='error'] svg {
   margin-top: 2px;
 }
+
+.rowDetail[data-state='failed'] {
+  color: var(--tw-danger);
+}

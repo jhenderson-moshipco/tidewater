@@ -8,6 +8,7 @@ import { restoreTabs, startSavingDrafts } from './query/tab-drafts';
 import { listenToMenuCommands } from './shell/menu-commands';
 import { App } from './shell/boot';
 import { useServerStore } from './store/servers';
+import { useTreeStore } from './store/tree';
 
 const root_element = document.getElementById('root');
 if (!root_element) throw new Error('Missing #root element');
@@ -17,6 +18,7 @@ listenToQueryEvents();
 void (async () => {
   try {
     await useServerStore.getState().load();
+    void useTreeStore.getState().reopen();
   } finally {
     await restoreTabs();
     startSavingDrafts();
