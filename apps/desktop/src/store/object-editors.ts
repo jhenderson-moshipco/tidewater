@@ -1,7 +1,7 @@
 import { create } from 'zustand';
 import * as api from '../api/objects';
 import { messageOf } from '../api/errors';
-import type { ApplyFailure, ChangeOptions, ChangePlan, ObjectDefinition, ObjectRef, ObjectType } from '../generated/objects';
+import type { ApplyFailure, AvailableExtension, ChangeOptions, ChangePlan, ObjectDefinition, ObjectRef, ObjectType } from '../generated/objects';
 import { blankDefinition, capitalized, objectTypeOf, planStatements, qualifiedName, type_labels } from '../objects/describe';
 import { restoreFocusIfLost } from '../shell/focus';
 import { useDialogStore } from './dialogs';
@@ -25,6 +25,10 @@ export type ObjectEditor = {
   label: string;
   /** The schemas a new or moved object can go in. */
   schemas: ReadonlyArray<string>;
+  /** For an extension's editor, what the server can install. */
+  extensions: ReadonlyArray<AvailableExtension>;
+  /** For a database's editor, the roles that can own it. */
+  roles: ReadonlyArray<string>;
   loading: boolean;
   load_error: string | null;
   /** The definition as it is in the database; `null` for a new object. */
@@ -100,6 +104,13 @@ function appliedMessage(editor: ObjectEditor): string {
   return editor.mode === 'drop' ? `${capitalized(type)} ${name} dropped.` : `Changes to ${name} applied.`;
 }
 
+/** Shows an applied change in the tree: a database's listing for most objects, the server's for a database itself. */
+function refreshTree(editor: ObjectEditor, closed_database: string | null): Promise<void> {
+  const tree = useTreeStore.getState();
+  if (editor.object_type === 'database') return tree.refreshServer(editor.server_id, closed_database);
+  return tree.refreshDatabase(editor.server_id, editor.database);
+}
+
 /** Puts focus back on what opened a dialog editor, such as the tree, once the dialog has gone. */
 function returnFocus(id: string): void {
   const opener = openers.get(id);
@@ -118,7 +129,7 @@ type ObjectEditorState = {
   load: (id: string) => Promise<void>;
   change: (id: string, draft: ObjectDefinition) => void;
   /** Changes some of the draft's fields, by their names in the definition. */
-  patch: (id: string, fields: Readonly<Record<string, string | boolean | null>>) => void;
+  patch: (id: string, fields: Readonly<Record<string, string | number | boolean | null>>) => void;
   setOptions: (id: string, options: Partial<ChangeOptions>) => void;
   plan: (id: string) => Promise<void>;
   review: (id: string) => void;
@@ -154,7 +165,8 @@ export const useObjectEditorStore = create<ObjectEditorState>()((set, get) => {
    */
   const keepCommitted = async (id: string, editor: ObjectEditor, failure: ApplyFailure) => {
     update(id, { applying: false, failure, plan: null });
-    void useTreeStore.getState().refreshDatabase(editor.server_id, editor.database);
+    void refreshTree(editor, (editor.plan as ChangePlan).closes_database);
+    if (!editor.object) return;
     try {
       const current = await api.objectDefinition(editor.server_id, editor.object as ObjectRef);
       update(id, { original: current, start: current, draft: current });
@@ -197,12 +209,14 @@ export const useObjectEditorStore = create<ObjectEditorState>()((set, get) => {
         object: request.object,
         label: request.label,
         schemas: request.schema ? [request.schema] : [],
+        extensions: [],
+        roles: [],
         loading: true,
         load_error: null,
         original: null,
         start,
         draft: start,
-        options: { cascade: false, with_data: true },
+        options: { cascade: false, with_data: true, force: false },
         planning: false,
         plan: null,
         plan_error: null,
@@ -224,13 +238,17 @@ export const useObjectEditorStore = create<ObjectEditorState>()((set, get) => {
     load: async (id) => {
       const editor = get().editors[id] as ObjectEditor;
       update(id, { loading: true, load_error: null });
-      const wants_schemas = editor.object_type !== 'schema' && editor.mode !== 'drop';
+      const editing = editor.mode !== 'drop';
+      const wants = (type: ObjectType) => editing && editor.object_type === type;
+      const wants_schemas = editing && editor.object_type !== 'schema' && editor.object_type !== 'database';
       try {
-        const [schemas, original] = await Promise.all([
+        const [schemas, extensions, roles, original] = await Promise.all([
           wants_schemas ? api.listSchemas(editor.server_id, editor.database) : editor.schemas,
+          wants('extension') ? api.availableExtensions(editor.server_id, editor.database) : editor.extensions,
+          wants('database') ? api.listRoles(editor.server_id, editor.database) : editor.roles,
           editor.object ? api.objectDefinition(editor.server_id, editor.object) : null,
         ]);
-        update(id, { loading: false, schemas, ...(original && { original, start: original, draft: original }) });
+        update(id, { loading: false, schemas, extensions, roles, ...(original && { original, start: original, draft: original }) });
         if (editor.mode === 'drop') await get().plan(id);
       } catch (error) {
         update(id, { loading: false, load_error: messageOf(error) });
@@ -292,7 +310,7 @@ export const useObjectEditorStore = create<ObjectEditorState>()((set, get) => {
       update(id, { applying: true, failure: null, apply_error: null });
       try {
         const plan = editor.plan as ChangePlan;
-        const outcome = await api.applyObjectChange(editor.server_id, editor.database, plan.statements, plan.after_commit);
+        const outcome = await api.applyObjectChange(editor.server_id, editor.database, plan);
         if (outcome.outcome === 'failed' && outcome.failure.committed) {
           await keepCommitted(id, editor, outcome.failure);
           return;
@@ -303,7 +321,7 @@ export const useObjectEditorStore = create<ObjectEditorState>()((set, get) => {
         }
         set({ announcement: appliedMessage(editor) });
         get().closeEditor(id);
-        await useTreeStore.getState().refreshDatabase(editor.server_id, editor.database);
+        await refreshTree(editor, plan.closes_database);
       } catch (error) {
         update(id, { applying: false, apply_error: messageOf(error) });
       }

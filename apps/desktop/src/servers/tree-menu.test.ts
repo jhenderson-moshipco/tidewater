@@ -90,7 +90,7 @@ describe('rowMenu', () => {
     const calls = mockCommands({ disconnect_server: () => null });
     const open = row({ type: 'server', server: server(), connection: { status: 'connected', info } });
     const entries = rowMenu(open, []);
-    expect(texts(entries)).toEqual(['Disconnect', 'Edit…', 'Delete…', '—', 'Refresh']);
+    expect(texts(entries)).toEqual(['Disconnect', 'Edit…', 'Delete…', '—', 'New Database…', 'New Database in Tab', '—', 'Refresh']);
 
     run(entries, 'Refresh');
     expect(refreshRow).toHaveBeenCalledWith(open);
@@ -136,6 +136,16 @@ describe('rowMenu', () => {
       ['edit', 'dialog'],
       ['drop', undefined],
     ]);
+  });
+
+  it('offers to install an extension from the Extensions folder', () => {
+    const open = vi.fn((_request: EditorRequest) => 'editor-a');
+    useObjectEditorStore.setState({ open });
+    const folder = row({ type: 'node', server_id: 'orders-dev', node: catalogNode('db:orders/extensions', 'Extensions', { level: 'extensions', database: 'orders' }) });
+
+    run(rowMenu(folder, []), 'New Extension…');
+
+    expect(open).toHaveBeenCalledWith(expect.objectContaining({ mode: 'create', object_type: 'extension', database: 'orders', schema: null }));
   });
 
   it("offers to create the kind of object a folder holds, in the folder's schema", () => {

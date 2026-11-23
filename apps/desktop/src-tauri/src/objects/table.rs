@@ -482,7 +482,7 @@ mod tests {
     }
 
     fn options() -> ChangeOptions {
-        ChangeOptions { cascade: false, with_data: true }
+        ChangeOptions { cascade: false, with_data: true, force: false }
     }
 
     fn titles(planned: &Planned) -> Vec<&str> {
@@ -688,7 +688,7 @@ mod tests {
         defaulted.default = "now()".into();
         after.columns.extend([required_column, defaulted]);
 
-        let planned = alter(&orders(), &after, ChangeOptions { cascade: true, with_data: true }).unwrap();
+        let planned = alter(&orders(), &after, ChangeOptions { cascade: true, with_data: true, force: false }).unwrap();
 
         assert_eq!(planned.statements, [
             "ALTER TABLE public.order_items\n  DROP COLUMN note CASCADE,\n  ADD COLUMN sku text NOT NULL,\n  \
@@ -753,7 +753,7 @@ mod tests {
         let unique = ConstraintDefinition { not_valid: true, ..constraint(None, "one_note", ConstraintKind::Unique, &["note"]) };
         after.constraints.extend([check, key, unique]);
 
-        let planned = alter(&orders(), &after, ChangeOptions { cascade: true, with_data: true }).unwrap();
+        let planned = alter(&orders(), &after, ChangeOptions { cascade: true, with_data: true, force: false }).unwrap();
 
         assert_eq!(planned.statements, [
             "ALTER TABLE public.order_items\n  ADD CHECK (quantity < 100),\n  ADD CONSTRAINT item_order FOREIGN KEY (quantity) REFERENCES orders,\n  \

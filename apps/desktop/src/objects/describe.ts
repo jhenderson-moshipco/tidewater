@@ -2,8 +2,11 @@ import type { ObjectKind } from '../generated/catalog';
 import type { ColumnDefinition, ObjectDefinition, ObjectType } from '../generated/objects';
 
 export const type_labels: Readonly<Record<ObjectType, string>> = {
+  database: 'database',
+  extension: 'extension',
   schema: 'schema',
   table: 'table',
+  type: 'type',
   sequence: 'sequence',
   view: 'view',
   materialized_view: 'materialized view',
@@ -11,9 +14,10 @@ export const type_labels: Readonly<Record<ObjectType, string>> = {
   procedure: 'procedure',
 };
 
-/** The tree folders whose objects the editors can create, by the type they create. */
-const creatable: Partial<Record<ObjectKind, ObjectType>> = {
+/** The type each tree folder's + creates. */
+const creatable: Readonly<Record<ObjectKind, ObjectType>> = {
   table: 'table',
+  type: 'type',
   view: 'view',
   materialized_view: 'materialized_view',
   function: 'function',
@@ -21,8 +25,8 @@ const creatable: Partial<Record<ObjectKind, ObjectType>> = {
   sequence: 'sequence',
 };
 
-export function creatableType(kind: ObjectKind): ObjectType | null {
-  return creatable[kind] ?? null;
+export function creatableType(kind: ObjectKind): ObjectType {
+  return creatable[kind];
 }
 
 export function capitalized(text: string): string {
@@ -36,7 +40,7 @@ export function objectTypeOf(definition: ObjectDefinition): ObjectType {
 
 /** The object's name as SQL names it, schema first, with a routine's argument types. */
 export function qualifiedName(definition: ObjectDefinition): string {
-  if (definition.type === 'schema') return definition.name;
+  if (definition.type === 'schema' || definition.type === 'database' || definition.type === 'extension') return definition.name;
   const name = `${definition.schema}.${definition.name}`;
   return definition.type === 'routine' ? `${name}(${definition.identity_arguments})` : name;
 }
@@ -55,6 +59,24 @@ export function blankDefinition(type: ObjectType, schema: string): ObjectDefinit
   switch (type) {
     case 'schema':
       return { type: 'schema', name: '', comment: null };
+    case 'database':
+      return { type: 'database', name: '', owner: '', encoding: '', template: '', collation: '', ctype: '', connection_limit: -1, comment: null };
+    case 'extension':
+      return { type: 'extension', name: '', schema: '', version: '', comment: null };
+    case 'type':
+      return {
+        type: 'type',
+        schema,
+        name: '',
+        comment: null,
+        kind: 'enum',
+        values: [],
+        attributes: [],
+        base_type: '',
+        default: '',
+        not_null: false,
+        checks: [],
+      };
     case 'table':
       return { type: 'table', schema, name: '', comment: null, partition_key: null, columns: [blankColumn()], constraints: [], indexes: [] };
     case 'sequence':

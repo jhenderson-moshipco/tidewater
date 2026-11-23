@@ -357,3 +357,20 @@
   align-self: flex-start;
   border-style: dashed;
 }
+
+.list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.listRow {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.listRow > input {
+  flex: 1 1 0;
+  min-width: 0;
+}

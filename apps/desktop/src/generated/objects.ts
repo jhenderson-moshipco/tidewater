@@ -12,6 +12,11 @@ committed: boolean, message: string, detail: string | null, hint: string | null,
 
 export type ApplyOutcome = { "outcome": "applied" } | { "outcome": "failed", failure: ApplyFailure, };
 
+/**
+ * An extension the server can install, with every version it offers.
+ */
+export type AvailableExtension = { name: string, default_version: string, versions: Array<string>, installed: boolean, comment: string | null, };
+
 export type ChangeOptions = { 
 /**
  * Also drop what depends on an object that is dropped or recreated.
@@ -20,7 +25,11 @@ cascade: boolean,
 /**
  * Fill a materialized view as it is created; otherwise it waits for a refresh.
  */
-with_data: boolean, };
+with_data: boolean, 
+/**
+ * Disconnect other sessions from a database that is dropped (WITH (FORCE)).
+ */
+force: boolean, };
 
 export type ChangePlan = { 
 /**
@@ -34,7 +43,11 @@ dependents: Array<string>,
 /**
  * Statements that can't run in a transaction, each run on its own once the transaction commits.
  */
-after_commit: Array<string>, };
+after_commit: Array<string>, 
+/**
+ * A database the change drops or renames, which Tidewater's own sessions must leave first.
+ */
+closes_database: string | null, };
 
 export type ChangeWarning = { title: string, detail: string, };
 
@@ -88,6 +101,64 @@ not_valid: boolean, };
 
 export type ConstraintKind = "primary_key" | "unique" | "foreign_key" | "check" | "other";
 
+/**
+ * A database on the server. Its encoding, template and locale are fixed once it is created.
+ */
+export type DatabaseDefinition = { name: string, 
+/**
+ * Empty for the role that creates it.
+ */
+owner: string, 
+/**
+ * Empty for the template's.
+ */
+encoding: string, 
+/**
+ * Empty for `template1`. Postgres doesn't keep it, so an existing database reads it back empty.
+ */
+template: string, 
+/**
+ * Empty for the template's.
+ */
+collation: string, ctype: string, 
+/**
+ * How many sessions it takes at once; -1 for no limit.
+ */
+connection_limit: number, comment: string | null, };
+
+export type DomainCheck = { 
+/**
+ * The check's name in the database; null for a new check.
+ */
+original_name: string | null, 
+/**
+ * Empty to let Postgres name a new check.
+ */
+name: string, 
+/**
+ * The condition each value must meet, naming the value `VALUE`.
+ */
+expression: string, };
+
+export type EnumValue = { 
+/**
+ * The value's label in the database; null for a new value.
+ */
+original: string | null, label: string, };
+
+/**
+ * An installed extension. Extensions can't be renamed.
+ */
+export type ExtensionDefinition = { name: string, 
+/**
+ * The schema its objects go in; empty for the one the extension picks.
+ */
+schema: string, 
+/**
+ * Empty for the extension's default version.
+ */
+version: string, comment: string | null, };
+
 export type Identity = "none" | "always" | "by_default";
 
 export type IndexDefinition = { 
@@ -131,14 +202,14 @@ identity_arguments: string,
 /**
  * Empty for a procedure.
  */
-returns: string, language: string, volatility: Volatility, security_definer: boolean, parallel: Parallel, body: string, comment: string | null, } | { "type": "table" } & TableDefinition;
+returns: string, language: string, volatility: Volatility, security_definer: boolean, parallel: Parallel, body: string, comment: string | null, } | { "type": "table" } & TableDefinition | { "type": "type" } & TypeDefinition | { "type": "extension" } & ExtensionDefinition | { "type": "database" } & DatabaseDefinition;
 
 /**
  * An existing object, by its database and oid.
  */
 export type ObjectRef = { database: string, object_type: ObjectType, oid: number, };
 
-export type ObjectType = "schema" | "table" | "sequence" | "view" | "materialized_view" | "function" | "procedure";
+export type ObjectType = "database" | "extension" | "schema" | "table" | "type" | "sequence" | "view" | "materialized_view" | "function" | "procedure";
 
 export type Parallel = "unsafe" | "restricted" | "safe";
 
@@ -156,5 +227,34 @@ partition_key: string | null, columns: Array<ColumnDefinition>, constraints: Arr
  * The table's indexes, leaving out those that back a primary key or unique constraint.
  */
 indexes: Array<IndexDefinition>, };
+
+export type TypeAttribute = { 
+/**
+ * The attribute's name in the database; null for a new attribute.
+ */
+original_name: string | null, name: string, data_type: string, };
+
+/**
+ * A user-defined type. Only the fields of its kind apply.
+ */
+export type TypeDefinition = { schema: string, name: string, comment: string | null, kind: TypeKind, 
+/**
+ * An enum's values, in order.
+ */
+values: Array<EnumValue>, 
+/**
+ * A composite type's attributes, in order.
+ */
+attributes: Array<TypeAttribute>, 
+/**
+ * A domain's base type or a range's subtype.
+ */
+base_type: string, 
+/**
+ * A domain's default expression; empty for none.
+ */
+default: string, not_null: boolean, checks: Array<DomainCheck>, };
+
+export type TypeKind = "enum" | "composite" | "domain" | "range";
 
 export type Volatility = "volatile" | "stable" | "immutable";

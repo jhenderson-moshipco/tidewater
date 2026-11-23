@@ -96,7 +96,7 @@ const FOLDERS: [(ObjectKind, &str); 7] = [
     (ObjectKind::Type, "Types"),
 ];
 
-const DATABASES: &str = "SELECT datname FROM pg_database WHERE NOT datistemplate AND datallowconn ORDER BY datname";
+const DATABASES: &str = "SELECT datname, oid, current_database() FROM pg_database WHERE NOT datistemplate AND datallowconn ORDER BY datname";
 
 const SCHEMAS: &str = "\
 SELECT oid, nspname FROM pg_namespace
@@ -143,7 +143,7 @@ SELECT attname, format_type(atttypid, atttypmod), attnotnull FROM pg_attribute
 WHERE attrelid = $1 AND attnum > 0 AND NOT attisdropped
 ORDER BY attnum";
 
-const EXTENSIONS: &str = "SELECT extname, extversion FROM pg_extension ORDER BY extname";
+const EXTENSIONS: &str = "SELECT extname, extversion, oid FROM pg_extension ORDER BY extname";
 
 /// Postgres's short name for a type as `format_type` spells it, keeping precision and array brackets:
 /// `timestamp(3) with time zone` becomes `timestamptz(3)`, `character varying(255)[]` becomes `varchar(255)[]`.
@@ -177,6 +177,13 @@ pub fn short_type(full: &str) -> String {
     format!("{}{brackets}", short.as_deref().unwrap_or(base))
 }
 
+/// The database an editor connects to for a change to `database` itself, since one can't be dropped or renamed while
+/// connected to it: the one the listing came from, or else `postgres`, or else `template1`.
+fn maintenance_database(database: &str, current: &str) -> String {
+    let via = if database != current { current } else if database != "postgres" { "postgres" } else { "template1" };
+    via.to_string()
+}
+
 /// The databases on the connected server.
 pub async fn databases(client: &Client) -> Result<Vec<CatalogNode>, tokio_postgres::Error> {
     let rows = client.query(DATABASES, &[]).await?;
@@ -184,7 +191,9 @@ pub async fn databases(client: &Client) -> Result<Vec<CatalogNode>, tokio_postgr
         .iter()
         .map(|row| {
             let database: String = row.get(0);
-            node(format!("db:{database}"), database.clone(), None, NodeIcon::Database, Some(CatalogPath::Database { database }))
+            let via = maintenance_database(&database, row.get(2));
+            let found = node(format!("db:{database}"), database.clone(), None, NodeIcon::Database, Some(CatalogPath::Database { database }));
+            editable(found, &via, Some(ObjectType::Database), row.get(1))
         })
         .collect())
 }
@@ -273,7 +282,8 @@ pub async fn children(client: &Client, path: &CatalogPath, show_system: bool) ->
                 .map(|row| {
                     let name: String = row.get(0);
                     let version: String = row.get(1);
-                    node(format!("{prefix}/extension:{name}"), name, Some(version), NodeIcon::Extension, None)
+                    let found = node(format!("{prefix}/extension:{name}"), name, Some(version), NodeIcon::Extension, None);
+                    editable(found, &database, Some(ObjectType::Extension), row.get(2))
                 })
                 .collect())
         }
@@ -311,7 +321,8 @@ pub async fn children(client: &Client, path: &CatalogPath, show_system: bool) ->
                         let oid: u32 = row.get(0);
                         let name: String = row.get(1);
                         let variety: String = row.get(2);
-                        node(format!("{prefix}/type:{oid}"), name, Some(variety), NodeIcon::Type, None)
+                        let editor = (variety != "multirange").then_some(ObjectType::Type);
+                        editable(node(format!("{prefix}/type:{oid}"), name, Some(variety), NodeIcon::Type, None), &database, editor, oid)
                     })
                     .collect())
             }
@@ -544,7 +555,7 @@ CREATE DOMAIN positive_amount AS numeric CHECK (VALUE > 0);
 
     #[tokio::test]
     #[ignore = "needs TIDEWATER_TEST_DATABASE_URL pointing at a running Postgres"]
-    async fn live_marks_the_objects_an_editor_covers_and_leaves_types_aggregates_and_columns_unmarked() {
+    async fn live_marks_the_objects_an_editor_covers_and_leaves_aggregates_partitions_and_columns_unmarked() {
         let (client, database) = fixture_client().await;
         let schemas = children(&client, &CatalogPath::Database { database: database.clone() }, false).await.unwrap();
         let schema = schemas.iter().find(|node| node.label == "tw_catalog_test").unwrap();
@@ -563,9 +574,23 @@ CREATE DOMAIN positive_amount AS numeric CHECK (VALUE > 0);
             vec![Some(ObjectType::Function), None],
             vec![Some(ObjectType::Procedure)],
             vec![Some(ObjectType::Sequence)],
-            vec![None, None],
+            vec![Some(ObjectType::Type), Some(ObjectType::Type)],
         ]);
-        assert!(schemas.last().unwrap().object.is_none());
+        let extensions_folder = schemas.last().unwrap();
+        assert!(extensions_folder.object.is_none());
+        let extensions = children(&client, extensions_folder.children.as_ref().unwrap(), false).await.unwrap();
+        assert!(extensions.iter().all(|node| node.object.as_ref().map(|object| object.object_type) == Some(ObjectType::Extension)));
+        let listed = databases(&client).await.unwrap();
+        let own = listed.iter().find(|node| node.label == database).unwrap().object.as_ref().unwrap();
+        assert_eq!((own.object_type, own.database.as_str()), (ObjectType::Database, if database == "postgres" { "template1" } else { "postgres" }));
+    }
+
+    #[test]
+    fn a_database_is_changed_from_the_listing_database_unless_it_is_that_one() {
+        assert_eq!(
+            [maintenance_database("shop", "orders"), maintenance_database("orders", "orders"), maintenance_database("postgres", "postgres")],
+            ["orders", "postgres", "template1"]
+        );
     }
 
     #[tokio::test]

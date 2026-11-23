@@ -203,6 +203,14 @@ impl ConnectionManager {
         });
     }
 
+    /// Closes this server's connection to one database, as before it is dropped or renamed.
+    pub async fn disconnect_database(&self, server_id: &str, database: &str) {
+        let key = Key { server_id: server_id.to_string(), database: database.to_string() };
+        if let Some(connection) = self.live.lock().await.remove(&key) {
+            connection.driver.abort();
+        }
+    }
+
     pub async fn list(&self) -> Vec<ConnectionInfo> {
         self.live
             .lock()
@@ -298,6 +306,20 @@ mod tests {
 
         manager.disconnect("server-a").await;
         assert!(manager.list().await.is_empty());
+    }
+
+    #[tokio::test]
+    #[ignore = "needs TIDEWATER_TEST_DATABASE_URL pointing at a running Postgres"]
+    async fn live_disconnecting_a_database_closes_only_that_one() {
+        let manager = ConnectionManager::default();
+        manager.connect("server-a", live_params()).await.unwrap();
+        manager.connect("server-a", ConnectParams { database: "template1".into(), ..live_params() }).await.unwrap();
+
+        manager.disconnect_database("server-a", "template1").await;
+        manager.disconnect_database("server-a", "not-open").await;
+
+        let open: Vec<String> = manager.list().await.into_iter().map(|info| info.database).collect();
+        assert_eq!(open, [live_params().database]);
     }
 
     #[tokio::test]

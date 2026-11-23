@@ -62,6 +62,8 @@ fn with_commands<R: Runtime>(builder: Builder<R>) -> Builder<R> {
             commands::list_connections,
             commands::catalog_children,
             commands::list_schemas,
+            commands::available_extensions,
+            commands::list_roles,
             commands::object_definition,
             commands::plan_object_change,
             commands::apply_object_change,

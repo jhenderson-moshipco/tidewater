@@ -1,8 +1,10 @@
 //! Reads, plans and applies changes to schema objects. The DDL itself is written in `ddl`.
 
+pub mod databases;
 pub mod ddl;
 pub mod model;
 pub mod table;
+pub mod types;
 
 use serde::Serialize;
 use tokio_postgres::Client;
@@ -11,8 +13,9 @@ use ts_rs::TS;
 use crate::connections::{ConnectParams, describe, open};
 use crate::error::CommandError;
 use model::{
-    ApplyFailure, ChangeOptions, ChangePlan, ColumnDefinition, ConstraintDefinition, ConstraintKind, Identity, IndexDefinition, ObjectDefinition, ObjectRef,
-    ObjectType, Parallel, ReferentialAction, TableDefinition, Volatility,
+    ApplyFailure, AvailableExtension, ChangeOptions, ChangePlan, ColumnDefinition, ConstraintDefinition, ConstraintKind, DatabaseDefinition, DomainCheck, EnumValue,
+    ExtensionDefinition, Identity, IndexDefinition, ObjectDefinition, ObjectRef, ObjectType, Parallel, ReferentialAction, TableDefinition, TypeAttribute,
+    TypeDefinition, TypeKind, Volatility,
 };
 
 const SCHEMA_NAMES: &str = "\
@@ -82,6 +85,52 @@ SELECT n.nspname, c.relname, obj_description(c.oid, 'pg_class'), CASE WHEN c.rel
      WHERE k.conindid = i.indexrelid AND k.conrelid = i.indrelid AND k.contype IN ('p', 'u', 'x')))
 FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
 WHERE c.oid = $1 AND c.relkind IN ('r', 'p')";
+
+/// An enum, composite, domain or range, with its values, attributes and checks as JSON arrays.
+const TYPE: &str = "\
+SELECT n.nspname, t.typname, obj_description(t.oid, 'pg_type'), t.typtype::text,
+  (SELECT coalesce(json_agg(e.enumlabel ORDER BY e.enumsortorder), '[]') FROM pg_enum e WHERE e.enumtypid = t.oid)::text,
+  (SELECT coalesce(json_agg(json_build_array(a.attname, format_type(a.atttypid, a.atttypmod)) ORDER BY a.attnum), '[]')
+   FROM pg_attribute a WHERE a.attrelid = t.typrelid AND a.attnum > 0 AND NOT a.attisdropped)::text,
+  CASE t.typtype
+    WHEN 'd' THEN format_type(t.typbasetype, t.typtypmod)
+    WHEN 'r' THEN (SELECT format_type(r.rngsubtype, NULL) FROM pg_range r WHERE r.rngtypid = t.oid)
+    ELSE '' END,
+  coalesce(t.typdefault, ''), t.typnotnull,
+  (SELECT coalesce(json_agg(json_build_array(c.conname, pg_get_expr(c.conbin, 0)) ORDER BY c.conname), '[]')
+   FROM pg_constraint c WHERE c.contypid = t.oid AND c.contype = 'c')::text
+FROM pg_type t JOIN pg_namespace n ON n.oid = t.typnamespace
+WHERE t.oid = $1 AND t.typtype IN ('e', 'c', 'd', 'r')";
+const EXTENSION: &str = "\
+SELECT e.extname, n.nspname, e.extversion, obj_description(e.oid, 'pg_extension')
+FROM pg_extension e JOIN pg_namespace n ON n.oid = e.extnamespace
+WHERE e.oid = $1";
+const DATABASE: &str = "\
+SELECT datname, pg_get_userbyid(datdba), pg_encoding_to_char(encoding), datcollate, datctype, datconnlimit, shobj_description(oid, 'pg_database')
+FROM pg_database WHERE oid = $1";
+const AVAILABLE_EXTENSIONS: &str = "\
+SELECT a.name, coalesce(a.default_version, ''),
+  ARRAY(SELECT v.version FROM pg_available_extension_versions v WHERE v.name = a.name ORDER BY v.version),
+  a.installed_version IS NOT NULL, a.comment
+FROM pg_available_extensions a ORDER BY a.name";
+const ROLES: &str = "SELECT rolname FROM pg_roles WHERE rolname !~ '^pg_' ORDER BY rolname";
+/// Sessions on a database besides Tidewater's own, which Tidewater closes itself.
+const OTHER_SESSIONS: &str = "SELECT count(*) FROM pg_stat_activity WHERE datname = $1 AND application_name <> 'Tidewater'";
+
+/// The extensions this server can install, for picking one to create or a version to move to.
+pub async fn available_extensions(client: &Client) -> Result<Vec<AvailableExtension>, CommandError> {
+    let rows = client.query(AVAILABLE_EXTENSIONS, &[]).await?;
+    Ok(rows
+        .iter()
+        .map(|row| AvailableExtension { name: row.get(0), default_version: row.get(1), versions: row.get(2), installed: row.get(3), comment: row.get(4) })
+        .collect())
+}
+
+/// The server's roles, leaving out its built-in `pg_` ones, for choosing an owner.
+pub async fn role_names(client: &Client) -> Result<Vec<String>, CommandError> {
+    let rows = client.query(ROLES, &[]).await?;
+    Ok(rows.iter().map(|row| row.get(0)).collect())
+}
 
 /// The user's schemas in this database, for choosing where an object goes.
 pub async fn schema_names(client: &Client) -> Result<Vec<String>, CommandError> {
@@ -197,6 +246,34 @@ fn index(row: IndexRow) -> IndexDefinition {
     IndexDefinition { original_name: Some(name.clone()), name, unique, method, keys, clauses, concurrently: false }
 }
 
+fn type_kind(code: &str) -> TypeKind {
+    match code {
+        "e" => TypeKind::Enum,
+        "c" => TypeKind::Composite,
+        "d" => TypeKind::Domain,
+        _ => TypeKind::Range,
+    }
+}
+
+async fn type_definition(client: &Client, oid: u32) -> Result<ObjectDefinition, CommandError> {
+    let row = client.query_opt(TYPE, &[&oid]).await?.ok_or_else(gone)?;
+    let labels: Vec<String> = json_rows(row.get(4));
+    let attributes: Vec<(String, String)> = json_rows(row.get(5));
+    let checks: Vec<(String, String)> = json_rows(row.get(9));
+    Ok(ObjectDefinition::Type(TypeDefinition {
+        schema: row.get(0),
+        name: row.get(1),
+        comment: row.get(2),
+        kind: type_kind(row.get(3)),
+        values: labels.into_iter().map(|label| EnumValue { original: Some(label.clone()), label }).collect(),
+        attributes: attributes.into_iter().map(|(name, data_type)| TypeAttribute { original_name: Some(name.clone()), name, data_type }).collect(),
+        base_type: row.get(6),
+        default: row.get(7),
+        not_null: row.get(8),
+        checks: checks.into_iter().map(|(name, expression)| DomainCheck { original_name: Some(name.clone()), name, expression }).collect(),
+    }))
+}
+
 async fn table_definition(client: &Client, oid: u32) -> Result<ObjectDefinition, CommandError> {
     let row = client.query_opt(TABLE, &[&oid]).await?.ok_or_else(gone)?;
     Ok(ObjectDefinition::Table(TableDefinition {
@@ -223,6 +300,24 @@ pub async fn definition(client: &Client, object: &ObjectRef) -> Result<ObjectDef
     let oid = object.oid;
     match object.object_type {
         ObjectType::Table => table_definition(client, oid).await,
+        ObjectType::Type => type_definition(client, oid).await,
+        ObjectType::Extension => {
+            let row = client.query_opt(EXTENSION, &[&oid]).await?.ok_or_else(gone)?;
+            Ok(ObjectDefinition::Extension(ExtensionDefinition { name: row.get(0), schema: row.get(1), version: row.get(2), comment: row.get(3) }))
+        }
+        ObjectType::Database => {
+            let row = client.query_opt(DATABASE, &[&oid]).await?.ok_or_else(gone)?;
+            Ok(ObjectDefinition::Database(DatabaseDefinition {
+                name: row.get(0),
+                owner: row.get(1),
+                encoding: row.get(2),
+                template: String::new(),
+                collation: row.get(3),
+                ctype: row.get(4),
+                connection_limit: row.get(5),
+                comment: row.get(6),
+            }))
+        }
         ObjectType::Schema => {
             let row = client.query_opt(SCHEMA, &[&oid]).await?.ok_or_else(gone)?;
             Ok(ObjectDefinition::Schema { name: row.get(0), comment: row.get(1) })
@@ -292,6 +387,9 @@ async fn check_query(client: &Client, query: &str, view_oid: Option<u32>) -> Res
 fn catalog_of(object_type: ObjectType) -> &'static str {
     match object_type {
         ObjectType::Schema => "pg_namespace",
+        ObjectType::Database => "pg_database",
+        ObjectType::Extension => "pg_extension",
+        ObjectType::Type => "pg_type",
         ObjectType::Table | ObjectType::Sequence | ObjectType::View | ObjectType::MaterializedView => "pg_class",
         ObjectType::Function | ObjectType::Procedure => "pg_proc",
     }
@@ -325,7 +423,27 @@ pub async fn plan(
             [&catalog_of(object.object_type), &object.oid, &planned.drops_original, &planned.dropped_columns, &planned.dropped_constraints];
         dependents = client.query(DEPENDENTS, &params).await?.iter().map(|row| row.get(0)).collect();
     }
-    Ok(ChangePlan { statements: planned.statements, warnings: planned.warnings, dependents, after_commit: planned.after_commit })
+    let mut warnings = planned.warnings;
+    if let Some(database) = &planned.closes_database {
+        warnings.extend(session_warnings(client, database, changed.is_none()).await?);
+    }
+    Ok(ChangePlan { statements: planned.statements, warnings, dependents, after_commit: planned.after_commit, closes_database: planned.closes_database })
+}
+
+/// What dropping or renaming `database` does to the sessions on it: Tidewater's are closed, and any others make it fail.
+async fn session_warnings(client: &Client, database: &str, dropping: bool) -> Result<Vec<model::ChangeWarning>, CommandError> {
+    let others: i64 = client.query_one(OTHER_SESSIONS, &[&database]).await?.get(0);
+    let mut warnings = vec![ddl::warning("Closes Tidewater's sessions on it", format!("Query tabs and the tree on {database} are disconnected first."))];
+    if others > 0 {
+        let sessions = if others == 1 { "1 other session is".to_string() } else { format!("{others} other sessions are") };
+        let detail = if dropping {
+            format!("{sessions} connected to {database}. Dropping it fails while they are, unless FORCE disconnects them.")
+        } else {
+            format!("{sessions} connected to {database}. Renaming it fails while they are.")
+        };
+        warnings.push(ddl::warning("Other sessions are connected", detail));
+    }
+    Ok(warnings)
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, TS)]
@@ -414,7 +532,7 @@ mod tests {
     }
 
     fn options() -> ChangeOptions {
-        ChangeOptions { cascade: false, with_data: true }
+        ChangeOptions { cascade: false, with_data: true, force: false }
     }
 
     #[test]
@@ -705,6 +823,107 @@ mod tests {
 
     #[tokio::test]
     #[ignore = "needs TIDEWATER_TEST_DATABASE_URL pointing at a running Postgres"]
+    async fn live_types_and_extensions_read_back_and_the_server_lists_its_extensions_and_roles() {
+        let scratch = Scratch::new(
+            "CREATE TYPE mood AS ENUM ('sad', 'ok'); COMMENT ON TYPE mood IS 'how it went';
+             CREATE TYPE address AS (street text, zip varchar(10));
+             CREATE DOMAIN quantity AS integer DEFAULT 1 NOT NULL CONSTRAINT positive CHECK (VALUE > 0);
+             CREATE TYPE span AS RANGE (SUBTYPE = numeric);
+             CREATE EXTENSION citext;",
+        )
+        .await;
+        let read = |name: &'static str| {
+            let scratch = &scratch;
+            async move {
+                let oid = scratch.oid(&format!("SELECT '{{schema}}.{name}'::regtype::oid")).await;
+                serde_json::from_value::<TypeDefinition>(serde_json::to_value(scratch.read(ObjectType::Type, oid).await.unwrap()).unwrap()).unwrap()
+            }
+        };
+
+        let mood = read("mood").await;
+        let address = read("address").await;
+        let quantity = read("quantity").await;
+        let span = read("span").await;
+        let extension_oid = scratch.oid("SELECT oid FROM pg_extension WHERE extname = 'citext'").await;
+        let extension = scratch.read(ObjectType::Extension, extension_oid).await.unwrap();
+
+        assert_eq!((mood.kind, mood.comment.as_deref()), (TypeKind::Enum, Some("how it went")));
+        assert_eq!(mood.values, [EnumValue { original: Some("sad".into()), label: "sad".into() }, EnumValue { original: Some("ok".into()), label: "ok".into() }]);
+        assert_eq!(address.attributes.iter().map(|attribute| (attribute.name.as_str(), attribute.data_type.as_str())).collect::<Vec<_>>(), [
+            ("street", "text"),
+            ("zip", "character varying(10)")
+        ]);
+        assert_eq!((quantity.kind, quantity.base_type.as_str(), quantity.default.as_str(), quantity.not_null), (TypeKind::Domain, "integer", "1", true));
+        assert_eq!(quantity.checks, [DomainCheck { original_name: Some("positive".into()), name: "positive".into(), expression: "(VALUE > 0)".into() }]);
+        assert_eq!((span.kind, span.base_type.as_str()), (TypeKind::Range, "numeric"));
+        assert_eq!(serde_json::to_value(&extension).unwrap()["schema"], serde_json::json!(scratch.schema));
+        let type_ref = scratch.object(ObjectType::Type, scratch.oid("SELECT '{schema}.mood'::regtype::oid").await);
+        let mood_definition = ObjectDefinition::Type(mood.clone());
+        let dropped_type = plan(&scratch.client, Some(&type_ref), Some(&mood_definition), None, options()).await.unwrap();
+        let extension_ref = scratch.object(ObjectType::Extension, extension_oid);
+        let dropped_extension = plan(&scratch.client, Some(&extension_ref), Some(&extension), None, options()).await.unwrap();
+        assert_eq!((dropped_type.dependents.len(), dropped_extension.dependents.len()), (0, 0));
+        let available = available_extensions(&scratch.client).await.unwrap();
+        let citext = available.iter().find(|candidate| candidate.name == "citext").unwrap();
+        assert!(citext.installed && citext.versions.contains(&citext.default_version));
+        assert!(role_names(&scratch.client).await.unwrap().contains(&live_params().user));
+        for object_type in [ObjectType::Type, ObjectType::Extension, ObjectType::Database] {
+            assert_eq!(scratch.read(object_type, 0).await.map_err(|error| crate::testing::parts(error).0), Err("not_found".to_string()), "{object_type:?}");
+        }
+        scratch.finish().await;
+    }
+
+    #[tokio::test]
+    #[ignore = "needs TIDEWATER_TEST_DATABASE_URL pointing at a running Postgres"]
+    async fn live_a_database_is_created_warned_about_its_other_sessions_and_dropped_with_force() {
+        let (client, driver) = open(&live_params()).await.unwrap();
+        let name = format!("tw_db_{}", uuid::Uuid::new_v4().simple());
+        let new_database = ObjectDefinition::Database(DatabaseDefinition {
+            name: name.clone(),
+            owner: String::new(),
+            encoding: "UTF8".into(),
+            template: "template0".into(),
+            collation: String::new(),
+            ctype: String::new(),
+            connection_limit: 10,
+            comment: Some("scratch".into()),
+        });
+        let created = plan(&client, None, None, Some(&new_database), options()).await.unwrap();
+        assert_eq!(apply(&live_params(), &created.statements, &created.after_commit).await.unwrap(), ApplyOutcome::Applied);
+
+        let oid: u32 = client.query_one("SELECT oid FROM pg_database WHERE datname = $1", &[&name]).await.unwrap().get(0);
+        let object = ObjectRef { database: live_params().database, object_type: ObjectType::Database, oid };
+        let read = definition(&client, &object).await.unwrap();
+        let read_back: DatabaseDefinition = serde_json::from_value(serde_json::to_value(&read).unwrap()).unwrap();
+        assert_eq!((read_back.encoding.as_str(), read_back.connection_limit, read_back.comment.as_deref()), ("UTF8", 10, Some("scratch")));
+
+        let (other, other_driver) = open(&ConnectParams { database: name.clone(), ..live_params() }).await.unwrap();
+        other.batch_execute("SET application_name = 'someone else'").await.unwrap();
+        let (another, another_driver) = open(&ConnectParams { database: name.clone(), ..live_params() }).await.unwrap();
+        another.batch_execute("SET application_name = 'someone else'").await.unwrap();
+        let renamed = ObjectDefinition::Database(DatabaseDefinition { name: format!("{name}_2"), ..read_back.clone() });
+        let rename = plan(&client, Some(&object), Some(&read), Some(&renamed), options()).await.unwrap();
+        let drop = plan(&client, Some(&object), Some(&read), None, ChangeOptions { force: true, ..options() }).await.unwrap();
+
+        let titles = |plan: &ChangePlan| plan.warnings.iter().map(|warning| warning.title.clone()).collect::<Vec<_>>();
+        assert_eq!(titles(&rename), ["Closes Tidewater's sessions on it", "Other sessions are connected"]);
+        assert_eq!(rename.warnings[1].detail, format!("2 other sessions are connected to {name}. Renaming it fails while they are."));
+        another_driver.abort();
+        let _ = another_driver.await;
+        let alone = plan(&client, Some(&object), Some(&read), Some(&renamed), options()).await.unwrap();
+        assert_eq!(alone.warnings[1].detail, format!("1 other session is connected to {name}. Renaming it fails while they are."));
+        assert!(drop.warnings[1].detail.ends_with("Dropping it fails while they are, unless FORCE disconnects them."));
+        assert_eq!(drop.closes_database.as_deref(), Some(name.as_str()));
+        assert_eq!(apply(&live_params(), &drop.statements, &drop.after_commit).await.unwrap(), ApplyOutcome::Applied);
+        assert_eq!(client.query_one("SELECT count(*) FROM pg_database WHERE datname = $1", &[&name]).await.unwrap().get::<_, i64>(0), 0);
+        let quiet = plan(&client, Some(&object), Some(&read), None, options()).await.unwrap();
+        assert_eq!(titles(&quiet), ["Closes Tidewater's sessions on it"]);
+        other_driver.abort();
+        driver.abort();
+    }
+
+    #[tokio::test]
+    #[ignore = "needs TIDEWATER_TEST_DATABASE_URL pointing at a running Postgres"]
     async fn live_a_dropped_connection_fails_reading_and_planning() {
         let (client, driver) = open(&live_params()).await.unwrap();
         driver.abort();
@@ -715,7 +934,7 @@ mod tests {
         let fails = |result: Result<(), CommandError>| result.map_err(|error| crate::testing::parts(error).0);
 
         assert_eq!(fails(schema_names(&client).await.map(|_| ())), Err("connection".into()));
-        for object_type in [ObjectType::Schema, ObjectType::Table, ObjectType::Sequence, ObjectType::View, ObjectType::Function] {
+        for object_type in [ObjectType::Schema, ObjectType::Table, ObjectType::Type, ObjectType::Extension, ObjectType::Database, ObjectType::Sequence, ObjectType::View, ObjectType::Function] {
             assert_eq!(fails(definition(&client, &object(object_type)).await.map(|_| ())), Err("connection".into()), "{object_type:?}");
         }
         let changed_view = ObjectDefinition::View { schema: "public".into(), name: "v".into(), query: "SELECT 2".into(), comment: None };
@@ -723,5 +942,21 @@ mod tests {
         assert_eq!(fails(replanned.map(|_| ())), Err("connection".into()));
         let dropped = plan(&client, Some(&object(ObjectType::Schema)), Some(&schema), None, options()).await;
         assert_eq!(fails(dropped.map(|_| ())), Err("connection".into()));
+        let database = |name: &str| {
+            ObjectDefinition::Database(DatabaseDefinition {
+                name: name.into(),
+                owner: String::new(),
+                encoding: String::new(),
+                template: String::new(),
+                collation: String::new(),
+                ctype: String::new(),
+                connection_limit: -1,
+                comment: None,
+            })
+        };
+        let renamed = plan(&client, None, Some(&database("a")), Some(&database("b")), options()).await;
+        assert_eq!(fails(renamed.map(|_| ())), Err("connection".into()));
+        assert_eq!(fails(available_extensions(&client).await.map(|_| ())), Err("connection".into()));
+        assert_eq!(fails(role_names(&client).await.map(|_| ())), Err("connection".into()));
     }
 }

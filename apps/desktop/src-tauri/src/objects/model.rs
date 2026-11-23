@@ -7,8 +7,11 @@ use ts_rs::TS;
 #[serde(rename_all = "snake_case")]
 #[ts(export, export_to = "objects.ts")]
 pub enum ObjectType {
+    Database,
+    Extension,
     Schema,
     Table,
+    Type,
     Sequence,
     View,
     MaterializedView,
@@ -95,6 +98,9 @@ pub enum ObjectDefinition {
         comment: Option<String>,
     },
     Table(TableDefinition),
+    Type(TypeDefinition),
+    Extension(ExtensionDefinition),
+    Database(DatabaseDefinition),
 }
 
 impl ObjectDefinition {
@@ -107,6 +113,9 @@ impl ObjectDefinition {
             ObjectDefinition::Routine { procedure: false, .. } => ObjectType::Function,
             ObjectDefinition::Routine { procedure: true, .. } => ObjectType::Procedure,
             ObjectDefinition::Table(_) => ObjectType::Table,
+            ObjectDefinition::Type(_) => ObjectType::Type,
+            ObjectDefinition::Extension(_) => ObjectType::Extension,
+            ObjectDefinition::Database(_) => ObjectType::Database,
         }
     }
 }
@@ -215,6 +224,106 @@ pub struct IndexDefinition {
     pub concurrently: bool,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "snake_case")]
+#[ts(export, export_to = "objects.ts")]
+pub enum TypeKind {
+    Enum,
+    Composite,
+    Domain,
+    Range,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "objects.ts")]
+pub struct EnumValue {
+    /// The value's label in the database; null for a new value.
+    pub original: Option<String>,
+    pub label: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "objects.ts")]
+pub struct TypeAttribute {
+    /// The attribute's name in the database; null for a new attribute.
+    pub original_name: Option<String>,
+    pub name: String,
+    pub data_type: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "objects.ts")]
+pub struct DomainCheck {
+    /// The check's name in the database; null for a new check.
+    pub original_name: Option<String>,
+    /// Empty to let Postgres name a new check.
+    pub name: String,
+    /// The condition each value must meet, naming the value `VALUE`.
+    pub expression: String,
+}
+
+/// A user-defined type. Only the fields of its kind apply.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "objects.ts")]
+pub struct TypeDefinition {
+    pub schema: String,
+    pub name: String,
+    pub comment: Option<String>,
+    pub kind: TypeKind,
+    /// An enum's values, in order.
+    pub values: Vec<EnumValue>,
+    /// A composite type's attributes, in order.
+    pub attributes: Vec<TypeAttribute>,
+    /// A domain's base type or a range's subtype.
+    pub base_type: String,
+    /// A domain's default expression; empty for none.
+    pub default: String,
+    pub not_null: bool,
+    pub checks: Vec<DomainCheck>,
+}
+
+/// An installed extension. Extensions can't be renamed.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "objects.ts")]
+pub struct ExtensionDefinition {
+    pub name: String,
+    /// The schema its objects go in; empty for the one the extension picks.
+    pub schema: String,
+    /// Empty for the extension's default version.
+    pub version: String,
+    pub comment: Option<String>,
+}
+
+/// A database on the server. Its encoding, template and locale are fixed once it is created.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "objects.ts")]
+pub struct DatabaseDefinition {
+    pub name: String,
+    /// Empty for the role that creates it.
+    pub owner: String,
+    /// Empty for the template's.
+    pub encoding: String,
+    /// Empty for `template1`. Postgres doesn't keep it, so an existing database reads it back empty.
+    pub template: String,
+    /// Empty for the template's.
+    pub collation: String,
+    pub ctype: String,
+    /// How many sessions it takes at once; -1 for no limit.
+    pub connection_limit: i32,
+    pub comment: Option<String>,
+}
+
+/// An extension the server can install, with every version it offers.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, TS)]
+#[ts(export, export_to = "objects.ts")]
+pub struct AvailableExtension {
+    pub name: String,
+    pub default_version: String,
+    pub versions: Vec<String>,
+    pub installed: bool,
+    pub comment: Option<String>,
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[ts(export, export_to = "objects.ts")]
 pub struct ChangeOptions {
@@ -222,6 +331,8 @@ pub struct ChangeOptions {
     pub cascade: bool,
     /// Fill a materialized view as it is created; otherwise it waits for a refresh.
     pub with_data: bool,
+    /// Disconnect other sessions from a database that is dropped (WITH (FORCE)).
+    pub force: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, TS)]
@@ -241,6 +352,8 @@ pub struct ChangePlan {
     pub dependents: Vec<String>,
     /// Statements that can't run in a transaction, each run on its own once the transaction commits.
     pub after_commit: Vec<String>,
+    /// A database the change drops or renames, which Tidewater's own sessions must leave first.
+    pub closes_database: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, TS)]

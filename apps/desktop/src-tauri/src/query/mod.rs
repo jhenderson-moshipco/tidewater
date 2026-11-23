@@ -406,10 +406,19 @@ impl QuerySessions {
 
     /// Ends every tab session on this server.
     pub async fn close_server(&self, server_id: &str) {
+        self.close_where(|session| session.server_id == server_id).await;
+    }
+
+    /// Ends the tab sessions on one of this server's databases, as before it is dropped or renamed.
+    pub async fn close_database(&self, server_id: &str, database: &str) {
+        self.close_where(|session| session.server_id == server_id && session.database == database).await;
+    }
+
+    async fn close_where(&self, matches: impl Fn(&Session) -> bool) {
         let tabs: Vec<(String, Arc<Tab>)> =
             self.tabs.lock().unwrap_or_else(std::sync::PoisonError::into_inner).iter().map(|(id, tab)| (id.clone(), tab.clone())).collect();
         for (tab_id, tab) in tabs {
-            if tab.session.lock().await.as_ref().is_some_and(|session| session.server_id == server_id) {
+            if tab.session.lock().await.as_ref().is_some_and(&matches) {
                 self.close(&tab_id);
             }
         }
@@ -575,6 +584,21 @@ mod tests {
         let statement = Statement { text: "SELECT '😀', x", span: StatementSpan { from: 10, to: 23 } };
         assert_eq!(utf16_offset(&statement, 1), 10);
         assert_eq!(utf16_offset(&statement, 13), 10 + utf16("SELECT '😀', "));
+    }
+
+    #[tokio::test]
+    #[ignore = "needs TIDEWATER_TEST_DATABASE_URL pointing at a running Postgres"]
+    async fn live_closing_a_database_ends_only_the_tabs_on_it() {
+        let (sessions, _) = sessions();
+        let template = ConnectParams { database: "template1".into(), ..live_params() };
+        sessions.run("on-template", "server-a", &template, "SELECT 1").await.unwrap();
+        sessions.run("on-main", "server-a", &live_params(), "SELECT 1").await.unwrap();
+        sessions.run("elsewhere", "server-b", &template, "SELECT 1").await.unwrap();
+
+        sessions.close_database("server-a", "template1").await;
+
+        let open = ["on-template", "on-main", "elsewhere"].map(|tab_id| sessions.existing(tab_id).is_some());
+        assert_eq!(open, [false, true, true]);
     }
 
     #[tokio::test]

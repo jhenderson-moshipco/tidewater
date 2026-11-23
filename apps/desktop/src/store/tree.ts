@@ -22,6 +22,8 @@ type TreeState = {
   expandRow: (row: TreeRow) => Promise<void>;
   collapseRow: (row: TreeRow) => void;
   refreshRow: (row: TreeRow) => Promise<void>;
+  /** Reloads the server's list of databases in place, forgetting what was loaded under a database that is gone. */
+  refreshServer: (server_id: string, gone_database: string | null) => Promise<void>;
   /** Reloads every listing shown under a database in place, as after a change to its objects. */
   refreshDatabase: (server_id: string, database: string) => Promise<void>;
   toggleSystem: () => void;
@@ -183,6 +185,14 @@ export const useTreeStore = create<TreeState>()(
             set((state) => ({ children: without(state.children, (candidate) => candidate === key || candidate.startsWith(`${key}/`)) }));
             if (row.expanded) await load(item.server_id, item.node.key, item.node.children);
           }
+        },
+
+        refreshServer: async (server_id, gone_database) => {
+          if (gone_database !== null) {
+            const gone = childrenKey(server_id, `db:${gone_database}`);
+            set((state) => ({ children: without(state.children, (key) => key === gone || key.startsWith(`${gone}/`)) }));
+          }
+          await load(server_id, '', null, true);
         },
 
         refreshDatabase: async (server_id, database) => {
