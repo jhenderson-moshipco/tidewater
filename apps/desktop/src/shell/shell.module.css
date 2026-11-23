@@ -89,6 +89,13 @@
   background: var(--tw-bg-editor);
 }
 
+.mainFilled {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  background: var(--tw-bg-editor);
+}
+
 .emptyState {
   display: flex;
   flex-direction: column;
@@ -145,6 +152,10 @@
 
 .resizer:focus-visible {
   outline: none;
+}
+
+.statusSpacer {
+  flex: 1 1 auto;
 }
 
 .startup {

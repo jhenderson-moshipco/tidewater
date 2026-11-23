@@ -4,7 +4,8 @@ use tauri::menu::{AboutMetadata, IsMenuItem, Menu, MenuEvent, MenuItem, MenuItem
 use tauri::{AppHandle, Emitter, Runtime};
 
 /// these id's get forwarded to the frontend
-const FORWARDED: [&str; 9] = [
+const FORWARDED: [&str; 13] = [
+    "new_query_tab",
     "new_connection",
     "open_settings",
     "view_explorer",
@@ -14,6 +15,9 @@ const FORWARDED: [&str; 9] = [
     "view_performance",
     "toggle_sidebar",
     "toggle_system_objects",
+    "run_statement",
+    "run_all",
+    "cancel_query",
 ];
 
 enum Entry {
@@ -66,7 +70,7 @@ const APP_MENU: &[Entry] = &[
 ];
 
 const FILE_MENU: &[Entry] = &[
-    Planned("New Query Tab", Some("CmdOrCtrl+T")),
+    Action("new_query_tab", "New Query Tab", Some("CmdOrCtrl+T")),
     Action("new_connection", "New Connection…", Some("CmdOrCtrl+Shift+N")),
     #[cfg(not(target_os = "macos"))]
     Action("open_settings", "Settings…", Some("CmdOrCtrl+,")),
@@ -113,10 +117,10 @@ const VIEW_MENU: &[Entry] = &[
 ];
 
 const QUERY_MENU: &[Entry] = &[
-    Planned("Run Statement", Some("CmdOrCtrl+Enter")),
-    Planned("Run All", Some("CmdOrCtrl+Shift+Enter")),
+    Action("run_statement", "Run Statement", Some("CmdOrCtrl+Enter")),
+    Action("run_all", "Run All", Some("CmdOrCtrl+Shift+Enter")),
     Planned("Run Across Group…", Some("CmdOrCtrl+Alt+Enter")),
-    Planned("Cancel", Some("CmdOrCtrl+.")),
+    Action("cancel_query", "Cancel", Some("CmdOrCtrl+.")),
     System(Separator),
     Planned("Explain", Some("CmdOrCtrl+E")),
     Planned("Explain Analyze", Some("CmdOrCtrl+Alt+E")),

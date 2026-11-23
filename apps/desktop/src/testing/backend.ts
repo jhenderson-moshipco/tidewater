@@ -2,6 +2,7 @@ import { mockIPC } from '@tauri-apps/api/mocks';
 import type { InvokeArgs } from '@tauri-apps/api/core';
 import type { CatalogNode, CatalogPath } from '../generated/catalog';
 import type { CommandError } from '../generated/errors';
+import type { QueryError, RunResult, StatementOutcome, StatementResult } from '../generated/query';
 import type { ServerGroup, ServerInput, ServerSummary } from '../generated/servers';
 import type { StoreStatusView } from '../generated/store';
 
@@ -87,4 +88,20 @@ export function deferred<T>(): { promise: Promise<T>; resolve: (value: T) => voi
 
 export function catalogNode(key: string, label: string, children: CatalogPath | null = null, detail: string | null = null): CatalogNode {
   return { key, label, detail, icon: children?.level === 'database' ? 'database' : 'table', children };
+}
+
+export function rowsOutcome(rows: Array<Array<string | null>>, overrides: Partial<Extract<StatementOutcome, { kind: 'rows' }>> = {}): StatementOutcome {
+  return { kind: 'rows', columns: [{ name: 'n', type_name: 'int4' }], rows, has_more: false, total_rows: rows.length, ...overrides };
+}
+
+export function statement(outcome: StatementOutcome, overrides: Partial<StatementResult> = {}): StatementResult {
+  return { span: { from: 0, to: 8 }, elapsed_ms: 12.4, notices: [], outcome, ...overrides };
+}
+
+export function runResult(statements: Array<StatementResult>, overrides: Partial<RunResult> = {}): RunResult {
+  return { statements, transaction: 'idle', session_replaced: false, ...overrides };
+}
+
+export function queryError(overrides: Partial<QueryError> = {}): QueryError {
+  return { message: 'syntax error at or near "SELEC"', code: '42601', detail: null, hint: null, position: null, ...overrides };
 }

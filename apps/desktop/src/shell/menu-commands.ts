@@ -1,6 +1,8 @@
 import { isTauri } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
+import { openNewTab } from '../query/open-tab';
 import { useDialogStore } from '../store/dialogs';
+import { useQueryTabStore } from '../store/query-tabs';
 import { useTreeStore } from '../store/tree';
 import { useSettingsStore } from '../store/settings';
 import { useWorkspaceStore, type WorkspaceView } from '../store/workspace';
@@ -36,6 +38,15 @@ function applyMenuCommand(id: string): void {
     workspace.toggleSidebar();
     return;
   }
+  if (id === 'new_query_tab') {
+    openNewTab();
+    return;
+  }
+  const tabs = useQueryTabStore.getState();
+  const active = tabs.active_id;
+  if (active && id === 'run_statement') return void tabs.run(active, 'statement');
+  if (active && id === 'run_all') return void tabs.run(active, 'all');
+  if (active && id === 'cancel_query') return void tabs.cancel(active);
   const view = menu_views[id];
   if (view) workspace.showView(view);
 }
