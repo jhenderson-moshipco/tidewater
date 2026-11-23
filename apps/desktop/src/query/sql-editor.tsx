@@ -70,8 +70,10 @@ export function revealInEditor(tab_id: string, position: number): void {
 
 export function SqlEditor({ model }: { model: { tab_id: string; title: string } }) {
   const mount = (element: HTMLDivElement) => {
-    const { text } = useQueryTabStore.getState().tabs[model.tab_id] as QueryTab;
-    const state = saved_states.get(model.tab_id) ?? EditorState.create({ doc: text, extensions: extensions(model.tab_id, model.title) });
+    const { text, selection } = useQueryTabStore.getState().tabs[model.tab_id] as QueryTab;
+    const cursor = { anchor: Math.min(selection.from, text.length), head: Math.min(selection.to, text.length) };
+    const state =
+      saved_states.get(model.tab_id) ?? EditorState.create({ doc: text, selection: cursor, extensions: extensions(model.tab_id, model.title) });
     const view = new EditorView({ state, parent: element });
     open_views.set(model.tab_id, view);
     return () => {

@@ -230,6 +230,23 @@ export function ConnectionDialog({ editing }: { editing: ServerSummary | null })
                 <input type="checkbox" name="read_only" defaultChecked={draft.read_only} />
                 Read-only sessions
               </label>
+              <label className={`${classes.field} ${classes.span3}`}>
+                <span className={classes.label}>Close idle results after (minutes)</span>
+                <input
+                  name="results_timeout_min"
+                  type="number"
+                  min={1}
+                  max={60}
+                  step={1}
+                  required
+                  aria-describedby="results-timeout-hint"
+                  className={classes.input}
+                  defaultValue={draft.results_timeout_min}
+                />
+                <span id="results-timeout-hint" className={classes.hint}>
+                  Rows still to fetch stay open this long, holding their transaction.
+                </span>
+              </label>
             </div>
           </fieldset>
 

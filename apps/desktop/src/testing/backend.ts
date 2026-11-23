@@ -2,6 +2,7 @@ import { mockIPC } from '@tauri-apps/api/mocks';
 import type { InvokeArgs } from '@tauri-apps/api/core';
 import type { CatalogNode, CatalogPath } from '../generated/catalog';
 import type { CommandError } from '../generated/errors';
+import type { TabDraft } from '../generated/drafts';
 import type { QueryError, RunResult, StatementOutcome, StatementResult } from '../generated/query';
 import type { ServerGroup, ServerInput, ServerSummary } from '../generated/servers';
 import type { StoreStatusView } from '../generated/store';
@@ -104,4 +105,19 @@ export function runResult(statements: Array<StatementResult>, overrides: Partial
 
 export function queryError(overrides: Partial<QueryError> = {}): QueryError {
   return { message: 'syntax error at or near "SELEC"', code: '42601', detail: null, hint: null, position: null, ...overrides };
+}
+
+export const stamp = { modified_ms: 1_000, size: 8 };
+
+export function draft(overrides: Partial<TabDraft> = {}): TabDraft {
+  return {
+    id: 'query-a',
+    title: 'Untitled-1',
+    connection: { server_id: 'orders-dev', database: 'orders' },
+    text: 'SELECT 1',
+    selection_from: 3,
+    selection_to: 3,
+    file: null,
+    ...overrides,
+  };
 }

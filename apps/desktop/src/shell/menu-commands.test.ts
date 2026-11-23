@@ -56,7 +56,22 @@ describe('menu commands', () => {
     await vi.waitFor(() => expect(commandsOf(calls)).toHaveLength(4));
 
     useQueryTabStore.setState({ active_id: null });
-    for (const command of ['run_statement', 'run_all', 'cancel_query']) await emit('menu', command);
+    for (const command of ['run_statement', 'run_all', 'cancel_query', 'save_query', 'save_query_as']) await emit('menu', command);
     expect(commandsOf(calls)).toHaveLength(4);
+  });
+
+  it('open a .sql file, and save or save as the active tab', async () => {
+    const calls = mockCommands({ 'plugin:dialog|open': () => null, 'plugin:dialog|save': () => null });
+    listenToMenuCommands();
+    await vi.waitFor(async () => {
+      await emit('menu', 'open_sql_file');
+      expect(commandsOf(calls)).toEqual(['plugin:dialog|open']);
+    });
+    useQueryTabStore.getState().openTab(null);
+
+    await emit('menu', 'save_query');
+    await emit('menu', 'save_query_as');
+
+    await vi.waitFor(() => expect(commandsOf(calls)).toEqual(['plugin:dialog|open', 'plugin:dialog|save', 'plugin:dialog|save']));
   });
 });

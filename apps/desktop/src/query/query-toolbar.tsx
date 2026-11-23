@@ -9,6 +9,7 @@ import classes from './query.module.css';
 export function QueryToolbar({ tab_id }: { tab_id: string }) {
   const connection = useQueryTabStore((state) => state.tabs[tab_id]?.connection ?? null);
   const status = useQueryTabStore((state) => state.tabs[tab_id]?.status ?? 'idle');
+  const path = useQueryTabStore((state) => state.tabs[tab_id]?.file?.path ?? null);
   const server = useServerStore((state) => state.servers.find((candidate) => candidate.id === connection?.server_id));
   const tabs = () => useQueryTabStore.getState();
   const pick = () => useDialogStore.getState().show({ kind: 'pick-connection', tab_id, then_run: null });
@@ -66,6 +67,7 @@ export function QueryToolbar({ tab_id }: { tab_id: string }) {
         Cancel
       </button>
       <span className={server_classes.spacer} />
+      {path && <span className={classes.filePath}>{path}</span>}
       {limits.length > 0 && (
         <span className={classes.limits}>
           <IconLock size={13} aria-hidden="true" />

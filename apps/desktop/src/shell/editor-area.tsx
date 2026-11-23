@@ -29,7 +29,7 @@ export function EditorArea() {
         <h1 className={classes.emptyTitle}>Tidewater</h1>
         <p className={classes.muted}>{has_servers ? 'No query tab open.' : 'No connections yet.'}</p>
         {unlocked && has_servers && (
-          <button type="button" className={`${server_classes.button} ${server_classes.primary}`} onClick={openNewTab}>
+          <button type="button" className={`${server_classes.button} ${server_classes.primary}`} onClick={() => openNewTab()}>
             New query
           </button>
         )}

@@ -4,10 +4,13 @@ use tauri::menu::{AboutMetadata, IsMenuItem, Menu, MenuEvent, MenuItem, MenuItem
 use tauri::{AppHandle, Emitter, Runtime};
 
 /// these id's get forwarded to the frontend
-const FORWARDED: [&str; 13] = [
+const FORWARDED: [&str; 16] = [
     "new_query_tab",
     "new_connection",
     "open_settings",
+    "open_sql_file",
+    "save_query",
+    "save_query_as",
     "view_explorer",
     "view_search",
     "view_files",
@@ -75,9 +78,9 @@ const FILE_MENU: &[Entry] = &[
     #[cfg(not(target_os = "macos"))]
     Action("open_settings", "Settings…", Some("CmdOrCtrl+,")),
     System(Separator),
-    Planned("Open .sql File…", Some("CmdOrCtrl+O")),
-    Planned("Save", Some("CmdOrCtrl+S")),
-    Planned("Save As…", Some("CmdOrCtrl+Shift+S")),
+    Action("open_sql_file", "Open .sql File…", Some("CmdOrCtrl+O")),
+    Action("save_query", "Save", Some("CmdOrCtrl+S")),
+    Action("save_query_as", "Save As…", Some("CmdOrCtrl+Shift+S")),
     System(Separator),
     Planned("Import Settings…", None),
     Planned("Export Settings…", None),

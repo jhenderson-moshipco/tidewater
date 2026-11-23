@@ -3,7 +3,7 @@ import type { KeyboardEvent } from 'react';
 import server_classes from '../servers/servers.module.css';
 import { environmentLabel } from '../servers/connection-form';
 import { restoreFocusIfLost } from '../shell/focus';
-import { useQueryTabStore } from '../store/query-tabs';
+import { isUnsaved, useQueryTabStore, type QueryTab } from '../store/query-tabs';
 import { useServerStore } from '../store/servers';
 import { openNewTab } from './open-tab';
 import classes from './query.module.css';
@@ -33,6 +33,7 @@ function moveFocus(event: KeyboardEvent<HTMLButtonElement>, index: number) {
 
 function TabButton({ model }: { model: { id: string; index: number; active: boolean } }) {
   const title = useQueryTabStore((state) => state.tabs[model.id]?.title ?? '');
+  const unsaved = useQueryTabStore((state) => isUnsaved(state.tabs[model.id] as QueryTab));
   const server_id = useQueryTabStore((state) => state.tabs[model.id]?.connection?.server_id ?? null);
   const environment = useServerStore((state) => state.servers.find((server) => server.id === server_id)?.environment ?? null);
 
@@ -51,6 +52,12 @@ function TabButton({ model }: { model: { id: string; index: number; active: bool
         onKeyDown={(event) => moveFocus(event, model.index)}
       >
         {title}
+        {unsaved && (
+          <>
+            <span aria-hidden="true" className={classes.unsavedDot} />
+            <span className="visually-hidden">, unsaved</span>
+          </>
+        )}
         {environment && (
           <span className={server_classes.badge} data-environment={environment}>
             {environmentLabel(environment)}
@@ -85,7 +92,7 @@ export function QueryTabStrip() {
           <TabButton key={id} model={{ id, index, active: id === active_id }} />
         ))}
       </div>
-      <button type="button" aria-label="New query tab" title="New query tab (⌘T)" className={server_classes.iconButton} onClick={openNewTab}>
+      <button type="button" aria-label="New query tab" title="New query tab (⌘T)" className={server_classes.iconButton} onClick={() => openNewTab()}>
         <IconPlus size={14} aria-hidden="true" />
       </button>
     </div>

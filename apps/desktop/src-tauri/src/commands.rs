@@ -7,6 +7,8 @@ use crate::connections::probe::{ProbeResult, probe};
 use crate::connections::url::{ParsedConnection, parse_connection_string};
 use crate::connections::{ConnectParams, ConnectionInfo, ConnectionManager};
 use crate::error::CommandError;
+use crate::files::drafts::{DraftSnapshot, DraftStore, RestoredTabs};
+use crate::files::{self, FileStamp, OpenedFile, SaveOutcome};
 use crate::query::split::{self, StatementSpan};
 use crate::query::{QuerySessions, RowBatch, RunResult};
 use crate::servers::model::{GroupInput, PasswordChange, ServerGroup, ServerInput, ServerListView, ServerSummary};
@@ -179,6 +181,27 @@ pub fn set_key_storage(store: State<'_, Store>, storage: KeyStorage) -> Result<(
     store.vault().set_storage(storage).map_err(CommandError::Storage)
 }
 
+#[tauri::command(async)]
+pub fn read_sql_file(path: String) -> Result<OpenedFile, CommandError> {
+    files::read_sql_file(std::path::Path::new(&path))
+}
+
+/// Saves the tab's text. With `expected`, saves only if no other program has changed the file since.
+#[tauri::command(async)]
+pub fn write_sql_file(path: String, text: String, expected: Option<FileStamp>) -> Result<SaveOutcome, CommandError> {
+    files::write_sql_file(std::path::Path::new(&path), &text, expected)
+}
+
+#[tauri::command(async)]
+pub fn load_tab_drafts(drafts: State<'_, DraftStore>) -> Result<RestoredTabs, CommandError> {
+    drafts.load()
+}
+
+#[tauri::command(async)]
+pub fn save_tab_drafts(drafts: State<'_, DraftStore>, snapshot: DraftSnapshot) -> Result<(), CommandError> {
+    drafts.save(snapshot)
+}
+
 #[cfg(test)]
 mod tests {
     use serde_json::{Value, json};
@@ -212,7 +235,8 @@ mod tests {
         mock_keychain();
         let folder = tempfile::tempdir().unwrap();
         let store = Store::new(folder.path().join("servers.json"), AppVault::new(folder.path(), Box::new(OsKeychain)));
-        let mut app = crate::with_commands(mock_builder().manage(store)).build(mock_context(noop_assets())).unwrap();
+        let drafts = DraftStore::new(folder.path().join("tabs.json"));
+        let mut app = crate::with_commands(mock_builder().manage(store).manage(drafts)).build(mock_context(noop_assets())).unwrap();
         crate::manage_state(&mut app).unwrap();
         with_window(app, folder)
     }
@@ -288,10 +312,10 @@ mod tests {
         let with_arguments = [
             "unlock_store", "save_server", "delete_server", "save_group", "delete_group", "test_connection", "connect_server",
             "disconnect_server", "catalog_children", "run_query", "fetch_more_rows", "cancel_query", "close_query_tab", "cancel_connect",
-            "set_key_storage",
+            "set_key_storage", "save_tab_drafts",
         ];
 
-        for command in ["store_status", "start_fresh_store", "list_servers", "list_connections", "key_storage"].iter().chain(&with_arguments) {
+        for command in ["store_status", "start_fresh_store", "list_servers", "list_connections", "key_storage", "load_tab_drafts"].iter().chain(&with_arguments) {
             assert!(refusal(&no_state, command).starts_with("state not managed"), "{command}");
         }
         for command in ["delete_server", "connect_server", "catalog_children"] {
@@ -443,5 +467,36 @@ mod tests {
         let app = test_app();
         std::fs::create_dir_all(app._folder.path().join("settings.json")).unwrap();
         assert_eq!(app.invoke("set_key_storage", json!({ "storage": "keychain" })).map_err(kind), Err("storage".into()));
+    }
+
+    #[test]
+    fn a_query_file_is_saved_and_opened_and_the_open_tabs_are_kept() {
+        let app = test_app();
+        let folder = tempfile::tempdir().unwrap();
+        let path = folder.path().join("q.sql").to_string_lossy().into_owned();
+        let tabs = json!({ "active_id": "a", "tabs": [] });
+
+        let saved = app.invoke("write_sql_file", json!({ "path": path, "text": "SELECT 1", "expected": null })).unwrap();
+        let opened = app.invoke("read_sql_file", json!({ "path": path })).unwrap();
+        assert_eq!(app.invoke("save_tab_drafts", json!({ "snapshot": tabs })), Ok(Value::Null));
+
+        assert_eq!((saved["outcome"].as_str(), opened["text"].as_str()), (Some("saved"), Some("SELECT 1")));
+        assert_eq!(app.invoke("load_tab_drafts", json!({})).unwrap()["snapshot"], tabs);
+        assert_eq!(app.invoke("read_sql_file", json!({ "path": "/nowhere/q.sql" })).map_err(kind), Err("not_found".into()));
+    }
+
+    #[test]
+    fn file_requests_missing_their_path_or_text_are_refused() {
+        let app = test_app();
+        for (command, args, missing) in [
+            ("read_sql_file", json!({}), "path"),
+            ("write_sql_file", json!({}), "path"),
+            ("write_sql_file", json!({ "path": "q.sql" }), "text"),
+        ] {
+            let refused = app.invoke(command, args).unwrap_err();
+            assert!(refused.as_str().unwrap().contains(&format!("missing required key {missing}")));
+        }
+        let unreadable = app.invoke("write_sql_file", json!({ "path": "q.sql", "text": "", "expected": "yesterday" }));
+        assert!(unreadable.unwrap_err().as_str().unwrap().contains("expected"));
     }
 }
