@@ -1,6 +1,7 @@
 import type { InvokeArgs } from '@tauri-apps/api/core';
 import { describe, expect, it } from 'vitest';
 import { mockCommands, serverInput } from '../testing/backend';
+import { catalogChildren } from './catalog';
 import * as api from './servers';
 
 const input = serverInput();
@@ -22,6 +23,7 @@ const commands: Array<[string, () => Promise<unknown>, InvokeArgs]> = [
   ['key_storage', () => api.keyStorage(), {}],
   ['set_key_storage', () => api.setKeyStorage('keychain'), { storage: 'keychain' }],
   ['list_connections', () => api.listConnections(), {}],
+  ['catalog_children', () => catalogChildren('orders-dev', null, true), { server_id: 'orders-dev', path: null, show_system: true }],
 ];
 
 describe('the Rust command wrappers', () => {

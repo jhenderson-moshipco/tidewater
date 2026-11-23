@@ -1,5 +1,6 @@
 //! Tidewater's Rust core: the app window, its native menu, saved servers and live connections.
 
+mod catalog;
 mod commands;
 mod connections;
 mod error;
@@ -46,6 +47,7 @@ fn with_commands<R: Runtime>(builder: Builder<R>) -> Builder<R> {
             commands::cancel_connect,
             commands::disconnect_server,
             commands::list_connections,
+            commands::catalog_children,
             commands::key_storage,
             commands::set_key_storage,
         ])

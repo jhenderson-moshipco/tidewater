@@ -2,6 +2,7 @@
 
 use tauri::State;
 
+use crate::catalog::{self, CatalogNode, CatalogPath};
 use crate::connections::probe::{ProbeResult, probe};
 use crate::connections::url::{ParsedConnection, parse_connection_string};
 use crate::connections::{ConnectParams, ConnectionInfo, ConnectionManager};
@@ -99,6 +100,27 @@ pub async fn disconnect_server(connections: State<'_, ConnectionManager>, id: St
 #[tauri::command]
 pub async fn list_connections(connections: State<'_, ConnectionManager>) -> Result<Vec<ConnectionInfo>, CommandError> {
     Ok(connections.list().await)
+}
+
+/// The children of a schema tree node, or the server's databases when `path` is empty. Opens the node's database lazily.
+#[tauri::command(rename_all = "snake_case")]
+pub async fn catalog_children(
+    store: State<'_, Store>,
+    connections: State<'_, ConnectionManager>,
+    server_id: String,
+    path: Option<CatalogPath>,
+    show_system: bool,
+) -> Result<Vec<CatalogNode>, CommandError> {
+    let mut params = store.read(|list| Ok(ConnectParams::from(list.find(&server_id)?)))?;
+    if let Some(path) = &path {
+        params.database = path.database().to_string();
+    }
+    let client = connections.client(&server_id, &params).await?;
+    let nodes = match &path {
+        None => catalog::databases(&client).await,
+        Some(path) => catalog::children(&client, path, show_system).await,
+    };
+    nodes.map_err(CommandError::from)
 }
 
 /// Where the key for the saved servers is kept: a file only this user can read, or the system keychain.
@@ -221,18 +243,22 @@ mod tests {
         let app = test_app();
         let with_arguments = [
             "unlock_store", "save_server", "delete_server", "save_group", "delete_group", "test_connection", "connect_server",
-            "disconnect_server", "cancel_connect", "set_key_storage",
+            "disconnect_server", "catalog_children", "cancel_connect", "set_key_storage",
         ];
 
         for command in ["store_status", "start_fresh_store", "list_servers", "list_connections", "key_storage"].iter().chain(&with_arguments) {
             assert!(refusal(&no_state, command).starts_with("state not managed"), "{command}");
         }
-        for command in ["delete_server", "connect_server"] {
+        for command in ["delete_server", "connect_server", "catalog_children"] {
             assert!(refusal(&store_only, command).starts_with("state not managed for field `connections`"), "{command}");
         }
         for command in with_arguments {
             assert!(refusal(&app, command).contains("missing required key"), "{command}");
         }
+        let unreadable_path = app.invoke("catalog_children", json!({ "server_id": "a", "path": "nowhere", "show_system": false }));
+        assert!(unreadable_path.unwrap_err().as_str().unwrap().contains("path"));
+        let no_toggle = app.invoke("catalog_children", json!({ "server_id": "a" }));
+        assert!(no_toggle.unwrap_err().as_str().unwrap().contains("missing required key show_system"));
         assert_eq!(app.invoke("list_servers", json!({})), Ok(json!({ "groups": [], "servers": [] })));
     }
     #[test]
@@ -256,6 +282,41 @@ mod tests {
         }
         let unknown = server_input(Some("missing"), port, json!({ "action": "keep" }));
         assert_eq!(app.invoke("test_connection", json!({ "input": unknown })).map_err(kind), Err("not_found".into()));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn the_schema_tree_reports_unknown_and_unreachable_servers() {
+        let app = test_app();
+        let port = closed_port().await.port;
+        let saved = app.invoke("save_server", json!({ "input": server_input(None, port, json!({ "action": "clear" })) })).unwrap();
+        let path = json!({ "level": "database", "database": "orders" });
+
+        let unknown = app.invoke("catalog_children", json!({ "server_id": "missing", "path": null, "show_system": false }));
+        let unreachable = app.invoke("catalog_children", json!({ "server_id": saved["id"], "path": path, "show_system": false }));
+
+        assert_eq!(unknown.map_err(kind), Err("not_found".into()));
+        assert_eq!(unreachable.map_err(kind), Err("connection".into()));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    #[ignore = "needs TIDEWATER_TEST_DATABASE_URL pointing at a running Postgres"]
+    async fn live_the_schema_tree_lists_databases_then_their_schemas() {
+        let app = test_app();
+        let live = crate::testing::live_params();
+        let mut input = server_input(None, live.port, json!({ "action": "set", "value": live.password }));
+        input["host"] = json!(live.host);
+        input["user"] = json!(live.user);
+        input["database"] = json!(live.database);
+        input["tls"] = json!("require");
+        let id = app.invoke("save_server", json!({ "input": input })).unwrap()["id"].clone();
+
+        let databases = app.invoke("catalog_children", json!({ "server_id": id, "path": null, "show_system": false })).unwrap();
+        let path = json!({ "level": "database", "database": live.database });
+        let schemas = app.invoke("catalog_children", json!({ "server_id": id, "path": path, "show_system": true })).unwrap();
+
+        let labels = |nodes: &Value| nodes.as_array().unwrap().iter().map(|node| node["label"].as_str().unwrap().to_string()).collect::<Vec<_>>();
+        assert!(labels(&databases).contains(&live.database));
+        assert!(labels(&schemas).contains(&"pg_catalog".to_string()));
     }
 
     #[tokio::test(flavor = "multi_thread")]

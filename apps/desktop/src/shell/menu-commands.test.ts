@@ -1,6 +1,7 @@
 import { emit } from '@tauri-apps/api/event';
 import { describe, expect, it, vi } from 'vitest';
 import { useDialogStore } from '../store/dialogs';
+import { useTreeStore } from '../store/tree';
 import { useWorkspaceStore } from '../store/workspace';
 import { mockCommands } from '../testing/backend';
 import { listenToMenuCommands } from './menu-commands';
@@ -28,6 +29,8 @@ describe('menu commands', () => {
     expect(workspace().active_view).toBe('history');
     await emit('menu', 'new_connection');
     expect(useDialogStore.getState().open).toEqual({ kind: 'connection', editing: null });
+    await emit('menu', 'toggle_system_objects');
+    expect(useTreeStore.getState().show_system).toBe(true);
     await emit('menu', 'open_settings');
     expect(useDialogStore.getState().open).toEqual({ kind: 'settings' });
   });

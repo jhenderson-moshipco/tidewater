@@ -4,7 +4,7 @@ import { useServerStore } from './servers';
 
 const state = () => useServerStore.getState();
 const empty_list = { groups: [], servers: [] };
-const info = { server_id: 'orders-dev', server_version: '17.2', encryption: 'TLSv1.3' };
+const info = { server_id: 'orders-dev', database: 'orders', server_version: '17.2', encryption: 'TLSv1.3' };
 
 describe('the server store', () => {
   it('loads nothing outside the Tauri app, and still finishes booting', async () => {

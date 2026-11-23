@@ -8,7 +8,7 @@ import { commandsOf, deferred, failWith, group, mockCommands, server } from '../
 import { renderWithUser } from '../testing/render';
 import { DialogHost } from './server-dialogs';
 
-const info = { server_id: 'orders-dev', server_version: '17.2', encryption: null };
+const info = { server_id: 'orders-dev', database: 'orders', server_version: '17.2', encryption: null };
 
 function openDialog(editing: ServerSummary | null) {
   useServerStore.setState({ groups: [group()] });

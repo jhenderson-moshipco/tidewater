@@ -2,6 +2,7 @@ import { act, screen } from '@testing-library/react';
 import { describe, expect, it, vi } from 'vitest';
 import { useDialogStore, type OpenDialog } from '../store/dialogs';
 import { useServerStore } from '../store/servers';
+import { useTreeStore } from '../store/tree';
 import { commandsOf, failWith, group, mockCommands, server, unlocked } from '../testing/backend';
 import { renderWithUser } from '../testing/render';
 import { closeDialogOf } from './modal';
@@ -46,6 +47,7 @@ describe('the group dialog', () => {
 describe('the confirmation dialogs', () => {
   it('delete a server, saying whether its password goes too', async () => {
     useServerStore.setState({ servers: [server()] });
+    useTreeStore.setState({ children: { 'orders-dev|': { status: 'loading', path: null } } });
     const calls = mockCommands({ delete_server: () => null });
     const { user } = openDialog({ kind: 'delete-server', server: server({ has_password: true }) });
     expect(message()).toBe('Its saved settings and password are removed.');
@@ -54,6 +56,7 @@ describe('the confirmation dialogs', () => {
 
     expect(commandsOf(calls)).toEqual(['delete_server']);
     expect(useServerStore.getState().servers).toEqual([]);
+    expect(useTreeStore.getState().children).toEqual({});
     act(() => useDialogStore.getState().show({ kind: 'delete-server', server: server() }));
     expect(message()).toBe('Its saved settings are removed.');
   });

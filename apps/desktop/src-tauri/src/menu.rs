@@ -4,7 +4,7 @@ use tauri::menu::{AboutMetadata, IsMenuItem, Menu, MenuEvent, MenuItem, MenuItem
 use tauri::{AppHandle, Emitter, Runtime};
 
 /// these id's get forwarded to the frontend
-const FORWARDED: [&str; 8] = [
+const FORWARDED: [&str; 9] = [
     "new_connection",
     "open_settings",
     "view_explorer",
@@ -13,6 +13,7 @@ const FORWARDED: [&str; 8] = [
     "view_history",
     "view_performance",
     "toggle_sidebar",
+    "toggle_system_objects",
 ];
 
 enum Entry {
@@ -105,6 +106,7 @@ const VIEW_MENU: &[Entry] = &[
     Action("view_performance", "Performance", Some("CmdOrCtrl+Shift+M")),
     System(Separator),
     Action("toggle_sidebar", "Toggle Sidebar", Some("CmdOrCtrl+B")),
+    Action("toggle_system_objects", "Show System Objects", None),
     Planned("Edit Layout…", None),
     System(Separator),
     System(Fullscreen),

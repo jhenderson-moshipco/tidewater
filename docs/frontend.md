@@ -32,6 +32,7 @@ Before writing an effect, use the table below to decide an option, if none match
 
 ## Components
 
+- Check interface decisions against [Laws of UX](https://lawsofux.com). Information people need at a glance, such as names and types in the schema tree, is shown in full rather than cut off.
 - Use native HTML elements first: `<button>`, `<dialog>` for modals, `<select>`, `<details>`. A `title` attribute is enough for a tooltip on a labelled button. Add a library only for a widget that HTML can't do accessibly, and only for that widget.
 - Style with CSS modules next to the component, using the `--tw-*` variables from `src/theme.css` for every color, so themes keep working.
 - A component takes a single typed view-model object rather than a long list of props.
@@ -46,6 +47,7 @@ Everything has to work from the keyboard alone and read clearly in a screen read
 - **Focus is never lost.** Close dialogs with the dialog's own `close()` so focus returns to what opened it. When an action removes the control that had focus, call `restoreFocusIfLost()` from `src/shell/focus.ts`.
 - **Announce results.** Put a `role="status"` region in the page before its text changes, and set one short sentence in it when an async action finishes. Errors use `role="alert"`. A region that appears and changes at the same moment is often not read.
 - **Don't move focus while someone is typing.** Fill fields in place rather than re-rendering the form around them.
+- **Trees follow the WAI-ARIA tree pattern.** The tree is one tab stop; arrow keys, Home, End and type-ahead move the active row, announced with `aria-activedescendant` so long lists can render only the rows on screen. Rows carry no buttons of their own: their actions live in the OS context menu (`showContextMenu` in `src/servers/tree-menu.ts`), opened by right-click, Shift+F10 or the Menu key, and in keyboard shortcuts.
 - **Not by color alone.** States also differ in shape or text, and the app stays usable in Windows high-contrast mode (`forced-colors`).
 
 Check a change by using it with the keyboard only, then with VoiceOver on macOS or NVDA on Windows.
