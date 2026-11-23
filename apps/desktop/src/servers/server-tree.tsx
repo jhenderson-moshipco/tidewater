@@ -21,7 +21,7 @@ import { useState, type KeyboardEvent, type MouseEvent, type UIEvent } from 'rea
 import type { NodeIcon } from '../generated/catalog';
 import { useDialogStore } from '../store/dialogs';
 import { useExplorerStore } from '../store/explorer';
-import { useServerStore } from '../store/servers';
+import { useServerStore, type ConnectionState } from '../store/servers';
 import { useTreeStore } from '../store/tree';
 import { useWorkspaceStore } from '../store/workspace';
 import { Elapsed } from '../shell/elapsed';
@@ -48,12 +48,19 @@ const node_icons: Readonly<Record<NodeIcon, Icon>> = {
   column: IconColumns,
 };
 
-const connection_labels = {
-  idle: 'not connected',
-  connecting: 'connecting',
-  connected: 'connected',
-  failed: 'connection failed',
-} as const;
+/** The state a server row shows after its badge. */
+export function connectionStatus(connection: ConnectionState | undefined): string {
+  switch (connection?.status) {
+    case undefined:
+      return 'Not connected';
+    case 'connecting':
+      return 'Connecting…';
+    case 'connected':
+      return `Connected · PG ${connection.info.server_version}`;
+    case 'failed':
+      return 'Failed';
+  }
+}
 
 function domId(row_id: string): string {
   return `tree-row-${row_id}`;
@@ -140,18 +147,21 @@ function RowLead({ row }: { row: TreeRow }) {
 function RowTrail({ row }: { row: TreeRow }) {
   const item = row.item;
   if (item.type === 'server') {
-    const state = item.connection?.status ?? 'idle';
+    const connection = item.connection;
     return (
       <>
-        <span className="visually-hidden">, {connection_labels[state]}</span>
         <span className={classes.badge} data-environment={item.server.environment}>
           {environmentLabel(item.server.environment)}
         </span>
-        {item.connection?.status === 'connecting' && (
-          <span className={classes.rowDetail}>
-            Connecting… <Elapsed started={item.connection.started} />
-          </span>
-        )}
+        <span className={classes.rowDetail} data-state={connection?.status ?? 'idle'}>
+          {connectionStatus(connection)}
+          {connection?.status === 'connecting' && (
+            <>
+              {' '}
+              <Elapsed started={connection.started} />
+            </>
+          )}
+        </span>
       </>
     );
   }

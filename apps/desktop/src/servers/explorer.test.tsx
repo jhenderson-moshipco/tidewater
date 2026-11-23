@@ -70,7 +70,7 @@ describe('the explorer', () => {
   it('shows the server tree once there are saved servers', () => {
     useServerStore.setState({ store: unlocked, groups: [group()], servers: [server({ group_id: 'orders-platform' })] });
     renderWithUser(<Explorer />);
-    expect(screen.getAllByRole('treeitem').map((row) => row.textContent)).toEqual(['Orders platform1 server', 'orders-dev, not connectedDEV']);
+    expect(screen.getAllByRole('treeitem').map((row) => row.textContent)).toEqual(['Orders platform1 server', 'orders-devDEVNot connected']);
   });
 });
 

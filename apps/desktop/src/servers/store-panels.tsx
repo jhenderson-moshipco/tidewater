@@ -4,6 +4,7 @@ import { messageOf } from '../api/errors';
 import { restoreFocusIfLost } from '../shell/focus';
 import { useDialogStore } from '../store/dialogs';
 import { useServerStore } from '../store/servers';
+import { useTreeStore } from '../store/tree';
 import { fieldText } from '../utils/forms';
 import classes from './servers.module.css';
 
@@ -36,6 +37,7 @@ export function PassphrasePanel() {
     setAttempt({ busy: true, error: null });
     try {
       await useServerStore.getState().unlock(passphrase);
+      void useTreeStore.getState().reopen();
       restoreFocusIfLost();
     } catch (error) {
       setAttempt({ busy: false, error: messageOf(error) });
