@@ -5,11 +5,15 @@ mod commands;
 mod connections;
 mod error;
 mod menu;
+mod query;
 mod servers;
 #[cfg(test)]
 mod testing;
 
-use tauri::{App, Builder, Manager, Runtime};
+use tauri::{App, Builder, Emitter, Manager, Runtime};
+
+/// Emitted with a tab id when that tab's idle results close on their own.
+pub const RESULTS_CLOSED_EVENT: &str = "query-results-closed";
 
 /// Adds Tidewater's state, menu and commands to a Tauri builder.
 pub fn app<R: Runtime>(builder: Builder<R>) -> Builder<R> {
@@ -19,6 +23,10 @@ pub fn app<R: Runtime>(builder: Builder<R>) -> Builder<R> {
 /// Registers the saved-server store and connection manager. Neither touches the disk or keychain until first use.
 fn manage_state<R: Runtime>(app: &mut App<R>) -> Result<(), Box<dyn std::error::Error>> {
     app.manage(connections::ConnectionManager::default());
+    let handle = app.handle().clone();
+    app.manage(query::QuerySessions::new(move |tab_id| {
+        let _ = handle.emit(RESULTS_CLOSED_EVENT, tab_id);
+    }));
     app.path()
         .app_config_dir()
         .map(|folder| {
@@ -48,6 +56,11 @@ fn with_commands<R: Runtime>(builder: Builder<R>) -> Builder<R> {
             commands::disconnect_server,
             commands::list_connections,
             commands::catalog_children,
+            commands::split_statements,
+            commands::run_query,
+            commands::fetch_more_rows,
+            commands::cancel_query,
+            commands::close_query_tab,
             commands::key_storage,
             commands::set_key_storage,
         ])

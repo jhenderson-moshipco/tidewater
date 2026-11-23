@@ -27,11 +27,24 @@ pub enum TlsMode {
     VerifyFull,
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[ts(export, export_to = "servers.ts")]
 pub struct SessionDefaults {
     pub read_only: bool,
     pub statement_timeout_ms: Option<u32>,
+    /// How long a query tab keeps results open for fetch more before closing them and their transaction.
+    #[serde(default = "default_results_timeout_ms")]
+    pub results_timeout_ms: u32,
+}
+
+const fn default_results_timeout_ms() -> u32 {
+    5 * 60 * 1000
+}
+
+impl Default for SessionDefaults {
+    fn default() -> Self {
+        SessionDefaults { read_only: false, statement_timeout_ms: None, results_timeout_ms: default_results_timeout_ms() }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
@@ -288,6 +301,13 @@ mod tests {
 
     fn not_found(message: &str) -> CommandError {
         CommandError::NotFound(message.into())
+    }
+
+    #[test]
+    fn session_defaults_saved_before_the_results_timeout_existed_load_with_five_minutes() {
+        let saved: SessionDefaults = serde_json::from_str(r#"{ "read_only": true, "statement_timeout_ms": null }"#).unwrap();
+        assert_eq!(saved, SessionDefaults { read_only: true, ..SessionDefaults::default() });
+        assert_eq!(saved.results_timeout_ms, 300_000);
     }
 
     #[test]

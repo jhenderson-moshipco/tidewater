@@ -50,7 +50,7 @@ export function server(overrides: Partial<ServerSummary> = {}): ServerSummary {
     user: 'app',
     has_password: false,
     tls: 'prefer',
-    session: { read_only: false, statement_timeout_ms: null },
+    session: { read_only: false, statement_timeout_ms: null, results_timeout_ms: 300_000 },
     ...overrides,
   };
 }
@@ -67,7 +67,7 @@ export function serverInput(overrides: Partial<ServerInput> = {}): ServerInput {
     user: 'app',
     password: { action: 'clear' },
     tls: 'prefer',
-    session: { read_only: false, statement_timeout_ms: null },
+    session: { read_only: false, statement_timeout_ms: null, results_timeout_ms: 300_000 },
     ...overrides,
   };
 }

@@ -20,6 +20,10 @@ export type ServerListView = { groups: Array<ServerGroup>, servers: Array<Server
  */
 export type ServerSummary = { id: string, name: string, group_id: string | null, environment: Environment, host: string, port: number, database: string, user: string, has_password: boolean, tls: TlsMode, session: SessionDefaults, };
 
-export type SessionDefaults = { read_only: boolean, statement_timeout_ms: number | null, };
+export type SessionDefaults = { read_only: boolean, statement_timeout_ms: number | null, 
+/**
+ * How long a query tab keeps results open for fetch more before closing them and their transaction.
+ */
+results_timeout_ms: number, };
 
 export type TlsMode = "disable" | "prefer" | "require" | "verify-ca" | "verify-full";
