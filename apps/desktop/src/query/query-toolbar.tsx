@@ -44,8 +44,17 @@ export function QueryToolbar({ tab_id }: { tab_id: string }) {
         disabled={status !== 'idle'}
         onClick={() => void tabs().run(tab_id, 'statement')}
       >
-        <IconPlayerPlay size={12} aria-hidden="true" />
-        Run <span className={classes.shortcut}>⌘↵</span>
+        {status === 'running' ? (
+          <>
+            <span aria-hidden="true" className="spinner" />
+            Running…
+          </>
+        ) : (
+          <>
+            <IconPlayerPlay size={12} aria-hidden="true" />
+            Run <span className={classes.shortcut}>⌘↵</span>
+          </>
+        )}
       </button>
       <button
         type="button"
