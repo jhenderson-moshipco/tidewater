@@ -355,3 +355,53 @@
   font-family: var(--tw-font-mono);
   font-size: var(--tw-font-size-small);
 }
+
+.progress {
+  position: relative;
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--tw-border);
+  font-size: var(--tw-font-size-small);
+  overflow: hidden;
+}
+
+.progressBar {
+  position: absolute;
+  left: 0;
+  bottom: 0;
+  width: 30%;
+  height: 2px;
+  background: var(--tw-accent);
+  animation: tw-progress 1.2s ease-in-out infinite;
+}
+
+@keyframes tw-progress {
+  from {
+    transform: translateX(-100%);
+  }
+  to {
+    transform: translateX(340%);
+  }
+}
+
+.results[data-busy='true'] .panelTabs,
+.results[data-busy='true'] .panelBody {
+  opacity: 0.55;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .progressBar {
+    animation: none;
+    width: 100%;
+    opacity: 0.4;
+  }
+}
+
+@media (forced-colors: active) {
+  .progressBar {
+    background: Highlight;
+  }
+}

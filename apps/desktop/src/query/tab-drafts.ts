@@ -34,6 +34,7 @@ function tabFrom(draft: TabDraft, connection: TabDraft['connection']): QueryTab 
     text: draft.text,
     selection: { from: draft.selection_from, to: draft.selection_to },
     status: 'idle',
+    started_at: null,
     result: null,
     run_offset: 0,
     panel: 0,

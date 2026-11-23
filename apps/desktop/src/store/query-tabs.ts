@@ -18,6 +18,8 @@ export type QueryTab = {
   text: string;
   selection: { from: number; to: number };
   status: 'idle' | 'running' | 'fetching';
+  /** When the current run or fetch started, in milliseconds since the epoch. */
+  started_at: number | null;
   result: RunResult | null;
   /** Where the text that last ran starts in the editor, so its spans and error positions map back. */
   run_offset: number;
@@ -107,6 +109,7 @@ export const useQueryTabStore = create<QueryTabState>()((set, get) => {
         text: content.text ?? '',
         selection: content.selection ?? { from: 0, to: 0 },
         status: 'idle',
+        started_at: null,
         result: null,
         run_offset: 0,
         panel: 0,
@@ -157,21 +160,21 @@ export const useQueryTabStore = create<QueryTabState>()((set, get) => {
         return;
       }
       const { server_id, database } = tab.connection;
-      update(id, { status: 'running', error: null });
+      update(id, { status: 'running', started_at: Date.now(), error: null });
       set({ announcement: 'Running…' });
       try {
         const target = await textToRun(tab, mode);
         if (!target) {
-          update(id, { status: 'idle' });
+          update(id, { status: 'idle', started_at: null });
           set({ announcement: 'There is no statement to run.' });
           return;
         }
         const result = await api.runQuery(id, server_id, database, target.sql);
-        update(id, { status: 'idle', result, run_offset: target.offset, panel: panelFor(result.statements), transaction: result.transaction });
+        update(id, { status: 'idle', started_at: null, result, run_offset: target.offset, panel: panelFor(result.statements), transaction: result.transaction });
         set({ announcement: runAnnouncement(result) });
       } catch (error) {
         const message = messageOf(error);
-        update(id, { status: 'idle', error: message });
+        update(id, { status: 'idle', started_at: null, error: message });
         set({ announcement: message });
       }
     },
@@ -180,7 +183,7 @@ export const useQueryTabStore = create<QueryTabState>()((set, get) => {
       const tab = get().tabs[id];
       const last = tab?.result?.statements[tab.result.statements.length - 1];
       if (!tab?.result || tab.status !== 'idle' || last?.outcome.kind !== 'rows') return;
-      update(id, { status: 'fetching', error: null });
+      update(id, { status: 'fetching', started_at: Date.now(), error: null });
       try {
         const batch = await api.fetchMoreRows(id);
         const rows = [...last.outcome.rows, ...batch.rows];
@@ -190,12 +193,12 @@ export const useQueryTabStore = create<QueryTabState>()((set, get) => {
           outcome: { ...last.outcome, rows, has_more: batch.has_more, total_rows: batch.has_more ? null : rows.length },
         };
         const result = { ...tab.result, statements: [...tab.result.statements.slice(0, -1), statement] };
-        update(id, { status: 'idle', result, transaction: batch.transaction });
+        update(id, { status: 'idle', started_at: null, result, transaction: batch.transaction });
         const more = batch.has_more ? ', more available' : '';
         set({ announcement: `${batch.rows.length.toLocaleString()} more rows, ${rows.length.toLocaleString()} in all${more}.` });
       } catch (error) {
         const message = messageOf(error);
-        update(id, { status: 'idle', error: message });
+        update(id, { status: 'idle', started_at: null, error: message });
         set({ announcement: message });
       }
     },

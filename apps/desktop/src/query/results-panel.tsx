@@ -1,5 +1,6 @@
 import { useId, type KeyboardEvent } from 'react';
 import type { Notice, QueryError, StatementResult } from '../generated/query';
+import { Elapsed } from '../shell/elapsed';
 import { useQueryTabStore, type QueryTab, type ResultPanel } from '../store/query-tabs';
 import { useWorkspaceStore } from '../store/workspace';
 import { outcomeLabel } from './describe';
@@ -69,6 +70,7 @@ function Messages({ notices }: { notices: ReadonlyArray<Notice> }) {
 
 function StatementView({ model }: { model: { tab_id: string; statement: StatementResult; index: number; last: boolean } }) {
   const busy = useQueryTabStore((state) => state.tabs[model.tab_id]?.status !== 'idle');
+  const fetching = useQueryTabStore((state) => state.tabs[model.tab_id]?.status === 'fetching');
   const { statement } = model;
   const { outcome } = statement;
   const elapsed = `${Math.round(statement.elapsed_ms).toLocaleString()} ms`;
@@ -87,7 +89,13 @@ function StatementView({ model }: { model: { tab_id: string; statement: Statemen
                 disabled={busy}
                 onClick={() => void useQueryTabStore.getState().fetchMore(model.tab_id)}
               >
-                Fetch next 500
+                {fetching ? (
+                  <>
+                    <span aria-hidden="true" className="spinner" /> Fetching…
+                  </>
+                ) : (
+                  'Fetch next 500'
+                )}
               </button>
             )}
             <span className={classes.spacer} />
@@ -108,17 +116,37 @@ function StatementView({ model }: { model: { tab_id: string; statement: Statemen
   }
 }
 
+/** What the tab is doing while a run or fetch is under way, shown above the results it will replace. */
+function Progress({ tab_id }: { tab_id: string }) {
+  const status = useQueryTabStore((state) => state.tabs[tab_id]?.status ?? 'idle');
+  const started_at = useQueryTabStore((state) => state.tabs[tab_id]?.started_at ?? null);
+  if (status === 'idle' || started_at === null) return null;
+
+  return (
+    <div className={classes.progress}>
+      <span aria-hidden="true" className="spinner" />
+      <span>
+        {status === 'running' ? 'Running…' : 'Fetching more rows…'} <Elapsed started={started_at} />
+      </span>
+      {status === 'running' && <span className={classes.muted}>⌘. to cancel</span>}
+      <span aria-hidden="true" className={classes.progressBar} />
+    </div>
+  );
+}
+
 export function ResultsPanel({ tab_id }: { tab_id: string }) {
   const id = useId();
   const result = useQueryTabStore((state) => state.tabs[tab_id]?.result ?? null);
   const panel = useQueryTabStore((state) => state.tabs[tab_id]?.panel ?? 0);
   const error = useQueryTabStore((state) => state.tabs[tab_id]?.error ?? null);
   const height = useWorkspaceStore((state) => state.results_height);
+  const busy = useQueryTabStore((state) => state.tabs[tab_id]?.status !== 'idle');
 
   if (!result) {
     return (
-      <section aria-label="Results" className={classes.results} style={{ height }}>
+      <section aria-label="Results" aria-busy={busy} className={classes.results} style={{ height }}>
         <ResultsResizer />
+        <Progress tab_id={tab_id} />
         {error ? (
           <p role="alert" className={classes.runError}>
             {error}
@@ -137,8 +165,9 @@ export function ResultsPanel({ tab_id }: { tab_id: string }) {
   const statement = typeof shown.panel === 'number' ? result.statements[shown.panel] : undefined;
 
   return (
-    <section aria-label="Results" className={classes.results} style={{ height }}>
-        <ResultsResizer />
+    <section aria-label="Results" aria-busy={busy} data-busy={busy} className={classes.results} style={{ height }}>
+      <ResultsResizer />
+      <Progress tab_id={tab_id} />
       {error && (
         <p role="alert" className={classes.runError}>
           {error}
