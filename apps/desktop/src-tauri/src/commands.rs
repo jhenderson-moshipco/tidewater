@@ -7,7 +7,7 @@ use crate::connections::probe::{ProbeResult, probe};
 use crate::connections::url::{ParsedConnection, parse_connection_string};
 use crate::connections::{ConnectParams, ConnectionInfo, ConnectionManager};
 use crate::error::CommandError;
-use crate::objects::model::{ChangeOptions, ChangePlan, ObjectDefinition, ObjectRef};
+use crate::objects::model::{AvailableExtension, ChangeOptions, ChangePlan, ObjectDefinition, ObjectRef};
 use crate::objects::{self, ApplyOutcome};
 use crate::files::drafts::{DraftSnapshot, DraftStore, RestoredTabs};
 use crate::files::{self, FileStamp, OpenedFile, SaveOutcome};
@@ -178,6 +178,30 @@ fn params_for(store: &Store, server_id: &str, database: &str) -> Result<ConnectP
     Ok(params)
 }
 
+/// The extensions the server can install, with their versions.
+#[tauri::command(rename_all = "snake_case")]
+pub async fn available_extensions(
+    store: State<'_, Store>,
+    connections: State<'_, ConnectionManager>,
+    server_id: String,
+    database: String,
+) -> Result<Vec<AvailableExtension>, CommandError> {
+    let client = connections.client(&server_id, &params_for(&store, &server_id, &database)?).await?;
+    objects::available_extensions(&client).await
+}
+
+/// The server's roles, for choosing an owner.
+#[tauri::command(rename_all = "snake_case")]
+pub async fn list_roles(
+    store: State<'_, Store>,
+    connections: State<'_, ConnectionManager>,
+    server_id: String,
+    database: String,
+) -> Result<Vec<String>, CommandError> {
+    let client = connections.client(&server_id, &params_for(&store, &server_id, &database)?).await?;
+    objects::role_names(&client).await
+}
+
 /// The user's schemas in a database, for choosing where an object goes.
 #[tauri::command(rename_all = "snake_case")]
 pub async fn list_schemas(
@@ -220,15 +244,25 @@ pub async fn plan_object_change(
 }
 
 /// Runs a plan's statements in one transaction, rolling all of them back if one fails, then each after-commit statement.
+/// When the plan drops or renames a database, Tidewater's own connections and query tabs on it close first.
 #[tauri::command(rename_all = "snake_case")]
+#[allow(clippy::too_many_arguments)]
 pub async fn apply_object_change(
     store: State<'_, Store>,
+    connections: State<'_, ConnectionManager>,
+    queries: State<'_, QuerySessions>,
     server_id: String,
     database: String,
     statements: Vec<String>,
     after_commit: Vec<String>,
+    closes_database: Option<String>,
 ) -> Result<ApplyOutcome, CommandError> {
-    objects::apply(&params_for(&store, &server_id, &database)?, &statements, &after_commit).await
+    let params = params_for(&store, &server_id, &database)?;
+    if let Some(closed) = &closes_database {
+        connections.disconnect_database(&server_id, closed).await;
+        queries.close_database(&server_id, closed).await;
+    }
+    objects::apply(&params, &statements, &after_commit).await
 }
 
 /// Where the key for the saved servers is kept: a file only this user can read, or the system keychain.
@@ -370,20 +404,31 @@ mod tests {
         let folder = tempfile::tempdir().unwrap();
         let store_only = mock_builder().manage(Store::new(folder.path().join("servers.json"), AppVault::new(folder.path(), Box::new(OsKeychain))));
         let store_only = with_window(crate::with_commands(store_only).build(mock_context(noop_assets())).unwrap(), folder);
+        let folder = tempfile::tempdir().unwrap();
+        let without_queries = mock_builder()
+            .manage(Store::new(folder.path().join("servers.json"), AppVault::new(folder.path(), Box::new(OsKeychain))))
+            .manage(ConnectionManager::default());
+        let without_queries = with_window(crate::with_commands(without_queries).build(mock_context(noop_assets())).unwrap(), folder);
         let app = test_app();
         let with_arguments = [
             "unlock_store", "save_server", "delete_server", "save_group", "delete_group", "test_connection", "connect_server",
-            "disconnect_server", "catalog_children", "list_schemas", "object_definition", "plan_object_change", "apply_object_change", "run_query", "fetch_more_rows", "cancel_query", "close_query_tab", "cancel_connect",
+            "disconnect_server", "catalog_children", "list_schemas", "available_extensions", "list_roles", "object_definition", "plan_object_change", "apply_object_change", "run_query", "fetch_more_rows", "cancel_query", "close_query_tab", "cancel_connect",
             "set_key_storage", "save_tab_drafts",
         ];
 
         for command in ["store_status", "start_fresh_store", "list_servers", "list_connections", "key_storage", "load_tab_drafts"].iter().chain(&with_arguments) {
             assert!(refusal(&no_state, command).starts_with("state not managed"), "{command}");
         }
-        for command in ["delete_server", "connect_server", "catalog_children", "list_schemas", "object_definition", "plan_object_change"] {
+        for command in ["delete_server", "connect_server", "catalog_children", "list_schemas", "available_extensions", "list_roles", "object_definition", "plan_object_change", "apply_object_change"] {
             assert!(refusal(&store_only, command).starts_with("state not managed for field `connections`"), "{command}");
         }
         assert!(refusal(&store_only, "run_query").starts_with("state not managed for field `queries`"));
+        assert!(refusal(&without_queries, "apply_object_change").starts_with("state not managed for field `queries`"));
+        let unreadable_database = app.invoke(
+            "apply_object_change",
+            json!({ "server_id": "a", "database": "b", "statements": [], "after_commit": [], "closes_database": 7 }),
+        );
+        assert!(unreadable_database.unwrap_err().as_str().unwrap().contains("closes_database"));
         for command in with_arguments {
             assert!(refusal(&app, command).contains("missing required key"), "{command}");
         }
@@ -568,13 +613,16 @@ mod tests {
         let port = closed_port().await.port;
         let saved = app.invoke("save_server", json!({ "input": server_input(None, port, json!({ "action": "clear" })) })).unwrap();
         let object = json!({ "database": "postgres", "object_type": "view", "oid": 1 });
-        let options = json!({ "cascade": false, "with_data": true });
+        let options = json!({ "cascade": false, "with_data": true, "force": false });
 
         let calls = [
             ("list_schemas", json!({ "server_id": saved["id"], "database": "postgres" })),
             ("object_definition", json!({ "server_id": saved["id"], "object": object })),
             ("plan_object_change", json!({ "server_id": saved["id"], "database": "postgres", "object": null, "original": null, "changed": null, "options": options })),
             ("apply_object_change", json!({ "server_id": saved["id"], "database": "postgres", "statements": ["SELECT 1"], "after_commit": [] })),
+            ("apply_object_change", json!({ "server_id": saved["id"], "database": "template1", "statements": [], "after_commit": [], "closes_database": "postgres" })),
+            ("available_extensions", json!({ "server_id": saved["id"], "database": "postgres" })),
+            ("list_roles", json!({ "server_id": saved["id"], "database": "postgres" })),
         ];
         for (command, args) in calls {
             assert_eq!(app.invoke(command, args).map_err(kind), Err("connection".into()), "{command}");
@@ -584,6 +632,8 @@ mod tests {
             ("object_definition", json!({ "server_id": "missing", "object": object })),
             ("plan_object_change", json!({ "server_id": "missing", "database": "postgres", "options": options })),
             ("apply_object_change", json!({ "server_id": "missing", "database": "postgres", "statements": [], "after_commit": [] })),
+            ("available_extensions", json!({ "server_id": "missing", "database": "postgres" })),
+            ("list_roles", json!({ "server_id": "missing", "database": "postgres" })),
         ] {
             assert_eq!(app.invoke(command, args).map_err(kind), Err("not_found".into()), "{command}");
         }
@@ -596,14 +646,16 @@ mod tests {
             ("apply_object_change", json!({ "server_id": "a" }), "database"),
             ("apply_object_change", json!({ "server_id": "a", "database": "b" }), "statements"),
             ("apply_object_change", json!({ "server_id": "a", "database": "b", "statements": [] }), "after_commit"),
+            ("available_extensions", json!({ "server_id": "a" }), "database"),
+            ("list_roles", json!({ "server_id": "a" }), "database"),
         ] {
             let refused = app.invoke(command, args).unwrap_err();
             assert!(refused.as_str().unwrap().contains(&format!("missing required key {missing}")), "{command}");
         }
-        let unreadable = app.invoke("plan_object_change", json!({ "server_id": "a", "database": "b", "object": 7, "options": { "cascade": false, "with_data": false } }));
+        let unreadable = app.invoke("plan_object_change", json!({ "server_id": "a", "database": "b", "object": 7, "options": { "cascade": false, "with_data": false, "force": false } }));
         assert!(unreadable.unwrap_err().as_str().unwrap().contains("object"));
         for key in ["original", "changed"] {
-            let args = json!({ "server_id": "a", "database": "b", key: 7, "options": { "cascade": false, "with_data": false } });
+            let args = json!({ "server_id": "a", "database": "b", key: 7, "options": { "cascade": false, "with_data": false, "force": false } });
             assert!(app.invoke("plan_object_change", args).unwrap_err().as_str().unwrap().contains(key));
         }
     }
@@ -620,11 +672,15 @@ mod tests {
         let id = app.invoke("save_server", json!({ "input": input })).unwrap()["id"].clone();
         let schema = format!("tw_{}", uuid::Uuid::new_v4().simple());
         let changed = json!({ "type": "schema", "name": schema, "comment": null });
-        let options = json!({ "cascade": true, "with_data": true });
+        let options = json!({ "cascade": true, "with_data": true, "force": false });
 
         let planned = app.invoke("plan_object_change", json!({ "server_id": id, "database": live.database, "object": null, "original": null, "changed": changed, "options": options })).unwrap();
         let applied = app.invoke("apply_object_change", json!({ "server_id": id, "database": live.database, "statements": planned["statements"], "after_commit": [] })).unwrap();
         let schemas = app.invoke("list_schemas", json!({ "server_id": id, "database": live.database })).unwrap();
+        let roles = app.invoke("list_roles", json!({ "server_id": id, "database": live.database })).unwrap();
+        let extensions = app.invoke("available_extensions", json!({ "server_id": id, "database": live.database })).unwrap();
+        assert!(roles.as_array().unwrap().contains(&json!(live.user)));
+        assert!(extensions.as_array().unwrap().iter().any(|extension| extension["name"] == "plpgsql"));
         let oid = app.invoke("catalog_children", json!({ "server_id": id, "path": { "level": "database", "database": live.database }, "show_system": false })).unwrap()
             .as_array().unwrap().iter().find(|node| node["label"] == json!(schema)).unwrap()["object"].clone();
         let read = app.invoke("object_definition", json!({ "server_id": id, "object": oid })).unwrap();

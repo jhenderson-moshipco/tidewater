@@ -335,3 +335,24 @@ describe('refreshing a database after a change to its objects', () => {
     expect(tree().children[childrenKey('orders-dev', 'db:orders')]).toEqual({ status: 'loaded', path: orders_path, nodes: schemas });
   });
 });
+
+describe('refreshing the server after a change to a database', () => {
+  it('reloads the list of databases in place and forgets what was loaded under one that is gone', async () => {
+    const shop_path: CatalogPath = { level: 'database', database: 'shop' };
+    useTreeStore.setState({
+      children: {
+        [childrenKey('orders-dev')]: { status: 'loaded', path: null, nodes: databases },
+        [childrenKey('orders-dev', 'db:shop')]: { status: 'loaded', path: shop_path, nodes: schemas },
+        [childrenKey('orders-dev', 'db:shop/schema:2200')]: { status: 'loaded', path: shop_path, nodes: [] },
+        [childrenKey('orders-dev', 'db:orders')]: { status: 'loaded', path: orders_path, nodes: schemas },
+      },
+    });
+    mockCommands({ catalog_children: () => databases.slice(0, 1) });
+
+    await tree().refreshServer('orders-dev', 'shop');
+    await tree().refreshServer('orders-dev', null);
+
+    expect(Object.keys(tree().children)).toEqual([childrenKey('orders-dev'), childrenKey('orders-dev', 'db:orders')]);
+    expect(tree().children[childrenKey('orders-dev')]).toEqual({ status: 'loaded', path: null, nodes: databases.slice(0, 1) });
+  });
+});

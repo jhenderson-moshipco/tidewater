@@ -81,6 +81,7 @@ export function rowMenu(row: TreeRow, rows: ReadonlyArray<TreeRow>): Array<MenuE
         { text: 'Edit…', action: () => useDialogStore.getState().openConnection(item.server) },
         { text: 'Delete…', action: () => dialogs.show({ kind: 'delete-server', server: item.server }) },
         'separator',
+        ...editorEntries(row, rows),
         { text: 'Refresh', enabled: connected, action: () => void tree.refreshRow(row) },
       ];
     }

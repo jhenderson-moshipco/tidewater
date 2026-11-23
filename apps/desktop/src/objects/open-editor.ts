@@ -14,15 +14,21 @@ export function editableObject(row: TreeRow): Editable | null {
   return { server_id: item.server_id, object: item.node.object, label: item.node.label };
 }
 
-/** What a tree row's + creates: a schema on a database row, or an object of a folder's kind in its schema. */
+/**
+ * What a tree row's + creates: a database on a connected server, a schema on a database, an extension in the
+ * Extensions folder, or an object of another folder's kind in its schema.
+ */
 export function creatableObject(row: TreeRow, rows: ReadonlyArray<TreeRow>): Creatable | null {
   const item = row.item;
+  if (item.type === 'server' && item.connection?.status === 'connected') {
+    return { server_id: item.server.id, database: item.server.database, object_type: 'database', schema: null };
+  }
   if (item.type !== 'node') return null;
   const path = item.node.children;
   if (path?.level === 'database') return { server_id: item.server_id, database: path.database, object_type: 'schema', schema: null };
+  if (path?.level === 'extensions') return { server_id: item.server_id, database: path.database, object_type: 'extension', schema: null };
   if (path?.level !== 'folder') return null;
   const object_type = creatableType(path.kind);
-  if (!object_type) return null;
   const schema = (rows.find((candidate) => candidate.id === row.parent_id) as TreeRow).label;
   return { server_id: item.server_id, database: path.database, object_type, schema };
 }

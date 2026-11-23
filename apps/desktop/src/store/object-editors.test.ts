@@ -143,7 +143,7 @@ describe('the SQL preview', () => {
       object: view_ref,
       original: viewDefinition(),
       changed,
-      options: { cascade: false, with_data: true },
+      options: { cascade: false, with_data: true, force: false },
     });
     expect(editor(id)).toMatchObject({ planning: false, plan: changePlan(), plan_error: null });
     expect(canReview(editor(id))).toBe(true);
@@ -212,7 +212,7 @@ describe('the SQL preview', () => {
     store().setOptions(id, { with_data: false });
     await planned();
 
-    expect(calls.at(-1)?.args).toMatchObject({ options: { cascade: false, with_data: false } });
+    expect(calls.at(-1)?.args).toMatchObject({ options: { cascade: false, with_data: false, force: false } });
     store().setOptions('gone', { cascade: true });
   });
 
@@ -283,7 +283,7 @@ describe('reviewing and applying', () => {
 
     await store().apply(id);
 
-    expect(calls.at(-1)?.args).toEqual({ server_id: 'orders-dev', database: 'orders', statements: changePlan().statements, after_commit: [] });
+    expect(calls.at(-1)?.args).toEqual({ server_id: 'orders-dev', database: 'orders', statements: changePlan().statements, after_commit: [], closes_database: null });
     expect([store().editors[id], useDialogStore.getState().open, store().announcement]).toEqual([
       undefined,
       null,
@@ -359,6 +359,23 @@ describe('reviewing and applying', () => {
     await planned();
     await store().apply(id);
     expect(editor(id).apply_error).toBe('connection refused');
+  });
+
+  it('keeps a new object\'s editor open with the failure when a statement after the commit fails, as there is nothing to read back', async () => {
+    const failure = { statement_index: 1, committed: true, message: 'comment failed', detail: null, hint: null };
+    const plan = changePlan({ statements: [], after_commit: ['CREATE DATABASE shop', "COMMENT ON DATABASE shop IS 'x'"] });
+    const calls = mockCommands({ list_roles: () => ['app'], plan_object_change: () => plan, apply_object_change: () => ({ outcome: 'failed', failure }) });
+    const refreshServer = vi.fn(async () => undefined);
+    useTreeStore.setState({ refreshServer });
+    const id = await opened({ ...create_view, object_type: 'database', schema: null });
+    store().patch(id, { name: 'shop' });
+    await planned();
+
+    await store().apply(id);
+
+    expect(editor(id)).toMatchObject({ failure, plan: null, applying: false });
+    expect(commandsOf(calls)).not.toContain('object_definition');
+    expect(refreshServer).toHaveBeenCalledWith('orders-dev', null);
   });
 
   it('shows why the change could not be sent at all, such as a lost connection', async () => {

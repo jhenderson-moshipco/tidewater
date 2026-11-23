@@ -1,7 +1,8 @@
 //! Writes the DDL for creating, changing and dropping schema objects. Nothing here touches a database.
 
-use super::model::{ChangeOptions, ChangeWarning, ObjectDefinition, Parallel, Volatility};
-use super::table;
+use super::model::{ChangeOptions, ChangeWarning, DatabaseDefinition, ExtensionDefinition, ObjectDefinition, Parallel, TableDefinition, TypeDefinition, Volatility};
+use super::model::TypeKind;
+use super::{databases, table, types};
 #[cfg(test)]
 use super::model::ObjectType;
 use crate::error::CommandError;
@@ -62,6 +63,8 @@ pub struct Planned {
     pub dropped_columns: Vec<i16>,
     /// The names of the table constraints the plan drops, whose dependents should be listed.
     pub dropped_constraints: Vec<String>,
+    /// A database the plan drops or renames, which Tidewater's own sessions must leave first.
+    pub closes_database: Option<String>,
 }
 
 pub(super) fn warning(title: &str, detail: impl Into<String>) -> ChangeWarning {
@@ -98,6 +101,10 @@ fn keyword(definition: &ObjectDefinition) -> &'static str {
         ObjectDefinition::Routine { procedure: false, .. } => "FUNCTION",
         ObjectDefinition::Routine { procedure: true, .. } => "PROCEDURE",
         ObjectDefinition::Table(_) => "TABLE",
+        ObjectDefinition::Type(definition) if definition.kind == TypeKind::Domain => "DOMAIN",
+        ObjectDefinition::Type(_) => "TYPE",
+        ObjectDefinition::Extension(_) => "EXTENSION",
+        ObjectDefinition::Database(_) => "DATABASE",
     }
 }
 
@@ -112,6 +119,9 @@ fn target(definition: &ObjectDefinition) -> String {
         ObjectDefinition::Routine { schema, name, identity_arguments, .. } if identity_arguments.is_empty() => qualified(schema, name),
         ObjectDefinition::Routine { schema, name, identity_arguments, .. } => format!("{}({identity_arguments})", qualified(schema, name)),
         ObjectDefinition::Table(table) => qualified(&table.schema, &table.name),
+        ObjectDefinition::Type(definition) => qualified(&definition.schema, &definition.name),
+        ObjectDefinition::Extension(extension) => ident(&extension.name),
+        ObjectDefinition::Database(database) => ident(&database.name),
     }
 }
 
@@ -123,6 +133,9 @@ fn comment(definition: &ObjectDefinition) -> &Option<String> {
         | ObjectDefinition::MaterializedView { comment, .. }
         | ObjectDefinition::Routine { comment, .. } => comment,
         ObjectDefinition::Table(table) => &table.comment,
+        ObjectDefinition::Type(definition) => &definition.comment,
+        ObjectDefinition::Extension(extension) => &extension.comment,
+        ObjectDefinition::Database(database) => &database.comment,
     }
 }
 
@@ -158,6 +171,9 @@ fn validate(definition: &ObjectDefinition) -> Result<(), CommandError> {
             required(body, "Body")
         }
         ObjectDefinition::Table(table) => table::validate(table),
+        ObjectDefinition::Type(definition) => types::validate(definition),
+        ObjectDefinition::Extension(extension) => databases::validate_extension(extension),
+        ObjectDefinition::Database(database) => databases::validate_database(database),
     }
 }
 
@@ -223,6 +239,9 @@ fn create_statement(definition: &ObjectDefinition, options: ChangeOptions, or_re
             lines.join("\n")
         }
         ObjectDefinition::Table(table) => table::create_statement(table),
+        ObjectDefinition::Type(definition) => types::create_statement(definition),
+        ObjectDefinition::Extension(extension) => databases::create_extension(extension, options),
+        ObjectDefinition::Database(database) => databases::create_database(database),
     }
 }
 
@@ -234,10 +253,22 @@ fn create(definition: &ObjectDefinition, options: ChangeOptions) -> Planned {
     if let ObjectDefinition::Table(table) = definition {
         statements.extend(table::after_create(table));
     }
+    if let ObjectDefinition::Database(_) = definition {
+        return Planned { after_commit: statements, ..Planned::default() };
+    }
     Planned { statements, ..Planned::default() }
 }
 
 fn drop(definition: &ObjectDefinition, options: ChangeOptions) -> Planned {
+    if let ObjectDefinition::Database(database) = definition {
+        let force = if options.force { " WITH (FORCE)" } else { "" };
+        return Planned {
+            after_commit: vec![format!("DROP DATABASE {}{force}", ident(&database.name))],
+            drops_original: true,
+            closes_database: Some(database.name.clone()),
+            ..Planned::default()
+        };
+    }
     let cascade = if options.cascade { " CASCADE" } else { "" };
     let mut warnings = Vec::new();
     if options.cascade {
@@ -255,6 +286,8 @@ fn location(definition: &ObjectDefinition) -> (&str, &str) {
         | ObjectDefinition::MaterializedView { schema, name, .. }
         | ObjectDefinition::Routine { schema, name, .. } => (schema, name),
         ObjectDefinition::Table(table) => (&table.schema, &table.name),
+        ObjectDefinition::Type(definition) => (&definition.schema, &definition.name),
+        ObjectDefinition::Extension(ExtensionDefinition { name, .. }) | ObjectDefinition::Database(DatabaseDefinition { name, .. }) => ("", name),
     }
 }
 
@@ -285,9 +318,13 @@ fn with_location(definition: &ObjectDefinition, schema: &str, name: &str) -> Obj
             *current_schema = schema.to_string();
             *current = name.to_string();
         }
-        ObjectDefinition::Table(table) => {
-            table.schema = schema.to_string();
-            table.name = name.to_string();
+        ObjectDefinition::Table(TableDefinition { schema: current_schema, name: current, .. })
+        | ObjectDefinition::Type(TypeDefinition { schema: current_schema, name: current, .. }) => {
+            *current_schema = schema.to_string();
+            *current = name.to_string();
+        }
+        ObjectDefinition::Extension(ExtensionDefinition { name: current, .. }) | ObjectDefinition::Database(DatabaseDefinition { name: current, .. }) => {
+            *current = name.to_string();
         }
     }
     located
@@ -329,8 +366,14 @@ fn relocate_and_comment(original: &ObjectDefinition, changed: &ObjectDefinition,
 }
 
 fn alter(original: &ObjectDefinition, changed: &ObjectDefinition, options: ChangeOptions, view_replaceable: bool) -> Result<Planned, CommandError> {
-    if let (ObjectDefinition::Table(before), ObjectDefinition::Table(after)) = (original, changed) {
-        let mut planned = table::alter(before, after, options)?;
+    let own_alter = match (original, changed) {
+        (ObjectDefinition::Table(before), ObjectDefinition::Table(after)) => Some(table::alter(before, after, options)?),
+        (ObjectDefinition::Type(before), ObjectDefinition::Type(after)) => Some(types::alter(before, after, options)?),
+        (ObjectDefinition::Extension(before), ObjectDefinition::Extension(after)) => Some(databases::alter_extension(before, after)?),
+        (ObjectDefinition::Database(before), ObjectDefinition::Database(after)) => Some(databases::alter_database(before, after)?),
+        _ => None,
+    };
+    if let Some(mut planned) = own_alter {
         relocate_and_comment(original, changed, &mut planned.statements);
         return Ok(planned);
     }
@@ -406,7 +449,7 @@ mod tests {
     use super::*;
 
     fn options() -> ChangeOptions {
-        ChangeOptions { cascade: false, with_data: true }
+        ChangeOptions { cascade: false, with_data: true, force: false }
     }
 
     /// The definition with some fields replaced, by their names in the shared JSON form.
@@ -580,7 +623,7 @@ mod tests {
     fn a_view_whose_columns_change_is_dropped_and_recreated_with_its_comment_and_a_warning() {
         let changed = with(&view("SELECT 1 AS a"), json!({ "comment": "Recent orders" }));
 
-        let planned = plan(Some(&view("SELECT 1 AS n")), Some(&changed), ChangeOptions { cascade: true, with_data: true }, false).unwrap();
+        let planned = plan(Some(&view("SELECT 1 AS n")), Some(&changed), ChangeOptions { cascade: true, with_data: true, force: false }, false).unwrap();
 
         assert_eq!(planned.statements, [
             "DROP VIEW public.recent CASCADE",
@@ -597,7 +640,7 @@ mod tests {
     #[test]
     fn a_materialized_view_whose_query_changes_is_recreated_and_filled_or_left_empty() {
         let filled = plan(Some(&materialized("SELECT 1")), Some(&materialized("SELECT 2")), options(), true).unwrap();
-        let empty = plan(Some(&materialized("SELECT 1")), Some(&materialized("SELECT 2")), ChangeOptions { cascade: false, with_data: false }, true).unwrap();
+        let empty = plan(Some(&materialized("SELECT 1")), Some(&materialized("SELECT 2")), ChangeOptions { cascade: false, with_data: false, force: false }, true).unwrap();
 
         assert_eq!(filled.statements, ["DROP MATERIALIZED VIEW public.totals", "CREATE MATERIALIZED VIEW public.totals AS\nSELECT 2\nWITH DATA"]);
         assert_eq!(filled.warnings.len(), 2);
@@ -657,7 +700,7 @@ mod tests {
     #[test]
     fn dropping_names_the_object_with_cascade_only_when_asked() {
         assert_eq!(statements(Some(&sequence()), None), ["DROP SEQUENCE public.order_numbers"]);
-        let cascaded = plan(Some(&schema("sales", None)), None, ChangeOptions { cascade: true, with_data: false }, true).unwrap();
+        let cascaded = plan(Some(&schema("sales", None)), None, ChangeOptions { cascade: true, with_data: false, force: false }, true).unwrap();
         assert_eq!(cascaded.statements, ["DROP SCHEMA sales CASCADE"]);
         assert_eq!(cascaded.warnings[0].title, "Drops its dependents too");
     }
@@ -733,4 +776,86 @@ mod tests {
         assert!(plan(Some(&with_generated("1")), Some(&with_generated("2")), options(), true).is_err());
     }
 
+
+    fn database(name: &str, comment: Option<&str>) -> ObjectDefinition {
+        ObjectDefinition::Database(DatabaseDefinition {
+            name: name.into(),
+            owner: String::new(),
+            encoding: String::new(),
+            template: String::new(),
+            collation: String::new(),
+            ctype: String::new(),
+            connection_limit: -1,
+            comment: comment.map(str::to_string),
+        })
+    }
+
+    fn domain(name: &str, schema: &str) -> ObjectDefinition {
+        ObjectDefinition::Type(TypeDefinition {
+            schema: schema.into(),
+            name: name.into(),
+            comment: None,
+            kind: TypeKind::Domain,
+            values: Vec::new(),
+            attributes: Vec::new(),
+            base_type: "integer".into(),
+            default: String::new(),
+            not_null: false,
+            checks: Vec::new(),
+        })
+    }
+
+    fn extension(schema: &str, comment: Option<&str>) -> ObjectDefinition {
+        ObjectDefinition::Extension(ExtensionDefinition { name: "citext".into(), schema: schema.into(), version: String::new(), comment: comment.map(str::to_string) })
+    }
+
+    #[test]
+    fn a_database_is_created_and_dropped_outside_the_transaction_and_names_itself_as_closed_when_renamed_or_dropped() {
+        let created = plan(None, Some(&database("shop", Some("orders and stock"))), options(), true).unwrap();
+        let forced = plan(Some(&database("shop", None)), None, ChangeOptions { force: true, ..options() }, true).unwrap();
+        let renamed = plan(Some(&database("shop", None)), Some(&database("store", Some("renamed"))), options(), true).unwrap();
+
+        assert_eq!((created.statements.len(), created.after_commit), (0, vec![
+            "CREATE DATABASE shop".to_string(),
+            "COMMENT ON DATABASE shop IS 'orders and stock'".to_string()
+        ]));
+        assert_eq!((forced.after_commit, forced.closes_database), (vec!["DROP DATABASE shop WITH (FORCE)".to_string()], Some("shop".to_string())));
+        assert_eq!(plan(Some(&database("shop", None)), None, options(), true).unwrap().after_commit, ["DROP DATABASE shop"]);
+        assert_eq!(renamed.statements, ["ALTER DATABASE shop RENAME TO store", "COMMENT ON DATABASE store IS 'renamed'"]);
+        assert_eq!(renamed.closes_database.as_deref(), Some("shop"));
+        assert_eq!(database("a", None).object_type(), ObjectType::Database);
+    }
+
+    #[test]
+    fn a_domain_is_named_as_a_domain_and_other_types_and_extensions_move_and_take_comments() {
+        let moved = plan(Some(&domain("qty", "public")), Some(&domain("quantity", "sales")), options(), true).unwrap();
+        let dropped = plan(Some(&domain("qty", "public")), None, options(), true).unwrap();
+        let enum_type = ObjectDefinition::Type(TypeDefinition { kind: TypeKind::Enum, ..type_of(&domain("mood", "public")) });
+        let commented = plan(Some(&enum_type), Some(&with(&enum_type, json!({ "comment": "how it went" }))), options(), true).unwrap();
+        let extended = plan(Some(&extension("public", None)), Some(&extension("ext", Some("case-blind text"))), options(), true).unwrap();
+        let installed = plan(None, Some(&extension("", None)), options(), true).unwrap();
+        let created_domain = plan(None, Some(&domain("qty", "public")), options(), true).unwrap();
+        assert_eq!(created_domain.statements, ["CREATE DOMAIN public.qty AS integer"]);
+
+        assert_eq!(moved.statements, ["ALTER DOMAIN public.qty RENAME TO quantity", "ALTER DOMAIN public.quantity SET SCHEMA sales"]);
+        assert_eq!(dropped.statements, ["DROP DOMAIN public.qty"]);
+        assert_eq!(commented.statements, ["COMMENT ON TYPE public.mood IS 'how it went'"]);
+        assert_eq!(extended.statements, ["ALTER EXTENSION citext SET SCHEMA ext", "COMMENT ON EXTENSION citext IS 'case-blind text'"]);
+        assert_eq!(installed.statements, ["CREATE EXTENSION citext"]);
+        assert_eq!([enum_type.object_type(), extension("", None).object_type()], [ObjectType::Type, ObjectType::Extension]);
+        assert!(plan(None, Some(&database("", None)), options(), true).is_err());
+        assert!(plan(Some(&domain("a", "public")), Some(&ObjectDefinition::Type(TypeDefinition { base_type: "text".into(), ..type_of(&domain("a", "public")) })), options(), true).is_err());
+        assert!(plan(None, Some(&domain("", "public")), options(), true).is_err());
+        assert!(plan(None, Some(&extension("", None)), options(), true).is_ok());
+        assert!(plan(Some(&extension("", None)), Some(&ObjectDefinition::Extension(ExtensionDefinition { name: "x".into(), schema: String::new(), version: String::new(), comment: None })), options(), true).is_err());
+        assert!(plan(Some(&database("a", None)), Some(&ObjectDefinition::Database(DatabaseDefinition { encoding: "LATIN1".into(), ..database_of(&database("a", None)) })), options(), true).is_err());
+    }
+
+    fn type_of(definition: &ObjectDefinition) -> TypeDefinition {
+        serde_json::from_value(serde_json::to_value(definition).unwrap()).unwrap()
+    }
+
+    fn database_of(definition: &ObjectDefinition) -> DatabaseDefinition {
+        serde_json::from_value(serde_json::to_value(definition).unwrap()).unwrap()
+    }
 }

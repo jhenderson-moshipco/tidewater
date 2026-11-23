@@ -246,7 +246,7 @@ describe('editing objects from the tree', () => {
   const view_ref = objectRef();
   const folder = (kind: 'view' | 'type') => ({ level: 'folder', database: 'orders', schema_oid: 2200, kind }) as const;
 
-  /** orders-dev open down to a view in public's Views folder, beside a Types folder the editors don't cover yet. */
+  /** orders-dev open down to a view in public's Views folder, with a leaf no editor covers beside it. */
   function objectTree() {
     useServerStore.setState({ servers: [server()], connections: { 'orders-dev': { status: 'connected', info } } });
     const db = 'db:orders';
@@ -273,7 +273,7 @@ describe('editing objects from the tree', () => {
         [childrenKey('orders-dev', `${schema}/View`)]: {
           status: 'loaded',
           path: folder('view'),
-          nodes: [catalogNode(`${db}/rel:16400`, 'open_orders', null, null, view_ref)],
+          nodes: [catalogNode(`${db}/rel:16400`, 'open_orders', null, null, view_ref), catalogNode(`${db}/rel:16400/col:id`, 'id')],
         },
       },
     });
@@ -289,9 +289,9 @@ describe('editing objects from the tree', () => {
     objectTree();
     renderWithUser(<ServerTree />);
 
-    const shortcuts = [/^orders$/, /^public/, /^Types/, /^Views/, /^open_orders/].map((label) => item(label).getAttribute('aria-keyshortcuts'));
+    const shortcuts = [/^orders-dev/, /^orders$/, /^public/, /^Types/, /^open_orders/, /^id$/].map((label) => item(label).getAttribute('aria-keyshortcuts'));
 
-    expect(shortcuts).toEqual(['Insert', 'F2 Delete', null, 'Insert', 'F2 Delete']);
+    expect(shortcuts).toEqual(['Insert', 'Insert', 'F2 Delete', 'Insert', 'F2 Delete', null]);
     expect(screen.queryByRole('button', { name: /Edit|New/ })).toBeNull();
   });
 
@@ -309,14 +309,16 @@ describe('editing objects from the tree', () => {
     press(/^open_orders/, 'Backspace');
     press(/^orders$/, 'Insert');
     press(/^Types/, 'Insert');
-    press(/^Types/, 'F2');
-    press(/^Types/, 'Delete');
+    press(/^id$/, 'Insert');
+    press(/^id$/, 'F2');
+    press(/^id$/, 'Delete');
 
     expect(open.mock.calls.map(([request]) => [request.mode, request.object_type, request.schema])).toEqual([
       ['edit', 'view', null],
       ['create', 'view', 'public'],
       ['drop', 'view', null],
       ['create', 'schema', null],
+      ['create', 'type', 'public'],
     ]);
     expect(open.mock.calls[0]?.[0]).toMatchObject({ server_id: 'orders-dev', database: 'orders', object: view_ref, label: 'open_orders' });
   });
@@ -332,6 +334,6 @@ describe('editing objects from the tree', () => {
 
     expect(open.mock.calls.map(([request]) => request.mode)).toEqual(['edit', 'create']);
     expect(active()).toBe(`tree-row-${nodeRowId('orders-dev', 'db:orders/schema:2200/View')}`);
-    expect(item(/^Types/).querySelector('[title]')).toBeNull();
+    expect(item(/^id$/).querySelector('[title]')).toBeNull();
   });
 });

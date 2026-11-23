@@ -3,7 +3,7 @@ import type { InvokeArgs } from '@tauri-apps/api/core';
 import type { CatalogNode, CatalogPath } from '../generated/catalog';
 import type { CommandError } from '../generated/errors';
 import type { TabDraft } from '../generated/drafts';
-import type { ChangePlan, ColumnDefinition, ObjectDefinition, ObjectRef, TableDefinition } from '../generated/objects';
+import type { AvailableExtension, ChangePlan, ColumnDefinition, DatabaseDefinition, ObjectDefinition, ObjectRef, TableDefinition, TypeDefinition } from '../generated/objects';
 import type { QueryError, RunResult, StatementOutcome, StatementResult } from '../generated/query';
 import type { ServerGroup, ServerInput, ServerSummary } from '../generated/servers';
 import type { StoreStatusView } from '../generated/store';
@@ -162,6 +162,7 @@ export function changePlan(overrides: Partial<ChangePlan> = {}): ChangePlan {
     warnings: [],
     dependents: [],
     after_commit: [],
+    closes_database: null,
     ...overrides,
   };
 }
@@ -210,4 +211,43 @@ export function tableDefinition(overrides: Partial<TableDefinition> = {}): Objec
     ],
     ...overrides,
   };
+}
+
+export function typeDefinition(overrides: Partial<TypeDefinition> = {}): ObjectDefinition {
+  return {
+    type: 'type',
+    schema: 'public',
+    name: 'mood',
+    comment: null,
+    kind: 'enum',
+    values: [
+      { original: 'sad', label: 'sad' },
+      { original: 'ok', label: 'ok' },
+    ],
+    attributes: [],
+    base_type: '',
+    default: '',
+    not_null: false,
+    checks: [],
+    ...overrides,
+  };
+}
+
+export function databaseDefinition(overrides: Partial<DatabaseDefinition> = {}): ObjectDefinition {
+  return {
+    type: 'database',
+    name: 'shop',
+    owner: 'app',
+    encoding: 'UTF8',
+    template: '',
+    collation: 'en_US.UTF-8',
+    ctype: 'en_US.UTF-8',
+    connection_limit: -1,
+    comment: null,
+    ...overrides,
+  };
+}
+
+export function availableExtension(overrides: Partial<AvailableExtension> = {}): AvailableExtension {
+  return { name: 'citext', default_version: '1.6', versions: ['1.5', '1.6'], installed: false, comment: 'case-insensitive text', ...overrides };
 }

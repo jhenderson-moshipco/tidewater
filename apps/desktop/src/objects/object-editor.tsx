@@ -56,14 +56,21 @@ function Dependents({ editor }: { editor: ObjectEditor }) {
       ) : (
         <p className={classes.muted}>Nothing else depends on it.</p>
       )}
-      <label className={form.check}>
-        <input
-          type="checkbox"
-          checked={editor.options.cascade}
-          onChange={(event) => editors().setOptions(editor.id, { cascade: event.currentTarget.checked })}
-        />
-        Drop the objects that depend on it too (CASCADE)
-      </label>
+      {editor.object_type === 'database' ? (
+        <label className={form.check}>
+          <input type="checkbox" checked={editor.options.force} onChange={(event) => editors().setOptions(editor.id, { force: event.currentTarget.checked })} />
+          Disconnect other sessions first (FORCE)
+        </label>
+      ) : (
+        <label className={form.check}>
+          <input
+            type="checkbox"
+            checked={editor.options.cascade}
+            onChange={(event) => editors().setOptions(editor.id, { cascade: event.currentTarget.checked })}
+          />
+          Drop the objects that depend on it too (CASCADE)
+        </label>
+      )}
     </div>
   );
 }
