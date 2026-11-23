@@ -14,7 +14,11 @@ type TreeState = {
   show_system: boolean;
   /** The latest sentence for the tree's status region. */
   announcement: string;
+  /** Servers connected through the tree, kept so the next launch reconnects them. */
+  open_servers: ReadonlyArray<string>;
   setActive: (id: string) => void;
+  /** Reconnects the servers that were open at the last quit and reopens their expanded rows. */
+  reopen: () => Promise<void>;
   expandRow: (row: TreeRow) => Promise<void>;
   collapseRow: (row: TreeRow) => void;
   refreshRow: (row: TreeRow) => Promise<void>;
@@ -51,11 +55,23 @@ export const useTreeStore = create<TreeState>()(
         await load(server_id, saved.key, saved.children);
       };
 
+      const markOpen = (server_id: string, open: boolean) =>
+        set((state) => {
+          const others = state.open_servers.filter((id) => id !== server_id);
+          return { open_servers: open ? [...others, server_id] : others };
+        });
+
+      /** Connects the server, keeping it in the reconnect list only once it is connected. */
+      const connectServer = async (server_id: string) => {
+        await useServerStore.getState().connect(server_id);
+        const connection = useServerStore.getState().connections[server_id];
+        markOpen(server_id, connection?.status === 'connected');
+        return connection;
+      };
+
       const openServer = async (server_id: string) => {
-        const servers = useServerStore.getState();
-        if (servers.connections[server_id]?.status !== 'connected') {
-          await servers.connect(server_id);
-          const connection = useServerStore.getState().connections[server_id];
+        if (useServerStore.getState().connections[server_id]?.status !== 'connected') {
+          const connection = await connectServer(server_id);
           const name = useServerStore.getState().servers.find((server) => server.id === server_id)?.name ?? 'server';
           if (connection?.status === 'failed') {
             set({ announcement: connection.message });
@@ -76,14 +92,56 @@ export const useTreeStore = create<TreeState>()(
         }
       };
 
+      /** The catalog node with this key among the server's loaded listings. */
+      const nodeOf = (server_id: string, node_key: string) =>
+        Object.entries(get().children)
+          .filter(([key]) => key.startsWith(childrenKey(server_id)))
+          .flatMap(([, loaded]) => (loaded.status === 'loaded' ? loaded.nodes : []))
+          .find((node) => node.key === node_key);
+
+      /** Loads each expanded row under the server whose listing isn't loaded, level by level. */
+      const reopenRows = async (server_id: string) => {
+        const prefix = `${serverRowId(server_id)}|`;
+        for (let opened = true; opened; ) {
+          opened = false;
+          for (const key of Object.keys(get().expanded).filter((candidate) => candidate.startsWith(prefix))) {
+            const node_key = key.slice(prefix.length);
+            const node = nodeOf(server_id, node_key);
+            if (get().children[childrenKey(server_id, node_key)] || !node?.children) continue;
+            await load(server_id, node_key, node.children);
+            opened = true;
+          }
+        }
+      };
+
       return {
         expanded: {},
         children: {},
         active_id: null,
         show_system: false,
         announcement: '',
+        open_servers: [],
 
         setActive: (id) => set({ active_id: id }),
+
+        reopen: async () => {
+          const servers = useServerStore.getState();
+          if (servers.store?.status !== 'unlocked') return;
+          const known = new Set(servers.servers.map((server) => server.id));
+          const ids = get().open_servers.filter((id) => known.has(id));
+          const kept = (key: string) => !key.startsWith('server:') || ids.some((id) => key === serverRowId(id) || key.startsWith(`${serverRowId(id)}|`));
+          set((state) => ({ open_servers: ids, expanded: without(state.expanded, (key) => !kept(key)) }));
+          await Promise.all(
+            ids.map(async (id) => {
+              if (!get().expanded[serverRowId(id)]) {
+                await connectServer(id);
+                return;
+              }
+              await openServer(id);
+              await reopenRows(id);
+            }),
+          );
+        },
 
         expandRow: async (row) => {
           const item = row.item;
@@ -136,6 +194,7 @@ export const useTreeStore = create<TreeState>()(
 
         forgetServer: (server_id) =>
           set((state) => ({
+            open_servers: state.open_servers.filter((id) => id !== server_id),
             children: without(state.children, (key) => key.startsWith(childrenKey(server_id))),
             expanded: without(state.expanded, (key) => key === serverRowId(server_id) || key.startsWith(`${serverRowId(server_id)}|`)),
           })),
@@ -144,7 +203,7 @@ export const useTreeStore = create<TreeState>()(
     {
       name: 'tidewater-tree',
       storage: createJSONStorage(() => localStorage),
-      partialize: (state) => ({ show_system: state.show_system }),
+      partialize: (state) => ({ show_system: state.show_system, expanded: state.expanded, open_servers: state.open_servers }),
     },
   ),
 );
