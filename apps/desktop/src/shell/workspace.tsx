@@ -1,4 +1,5 @@
 import { DialogHost } from '../servers/server-dialogs';
+import { useObjectEditorStore } from '../store/object-editors';
 import { useWorkspaceStore } from '../store/workspace';
 import { ActivityBar } from './activity-bar';
 import { EditorArea } from './editor-area';
@@ -8,6 +9,7 @@ import classes from './shell.module.css';
 
 export function Workspace() {
   const sidebar_open = useWorkspaceStore((state) => state.sidebar_open);
+  const object_announcement = useObjectEditorStore((state) => state.announcement);
 
   return (
     <div className={classes.window}>
@@ -18,6 +20,9 @@ export function Workspace() {
       </div>
       <StatusBar />
       <DialogHost />
+      <p role="status" className="visually-hidden">
+        {object_announcement}
+      </p>
     </div>
   );
 }

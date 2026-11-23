@@ -315,6 +315,38 @@ select.input {
   color: var(--tw-danger);
 }
 
+.rowActions {
+  display: none;
+  flex: none;
+  gap: 2px;
+  margin-inline-start: auto;
+}
+
+.rowDetail + .rowActions {
+  margin-inline-start: 0;
+}
+
+.row:hover .rowActions,
+.row[data-active='true'] .rowActions {
+  display: flex;
+}
+
+.rowAction {
+  width: 20px;
+  height: 20px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 4px;
+  color: var(--tw-text-muted);
+  cursor: pointer;
+}
+
+.rowAction:hover {
+  background: var(--tw-bg-hover);
+  color: var(--tw-text);
+}
+
 .chevron {
   width: 12px;
   flex: none;

@@ -11,9 +11,9 @@ export const save_delay_ms = 500;
 type TabState = Pick<ReturnType<typeof useQueryTabStore.getState>, 'tabs' | 'order' | 'active_id'>;
 
 export function draftSnapshot(state: TabState): DraftSnapshot {
-  const tabs = state.order.map((id) => state.tabs[id] as QueryTab);
+  const tabs = state.order.flatMap((id) => state.tabs[id] ?? []);
   return {
-    active_id: state.active_id,
+    active_id: state.active_id !== null && state.tabs[state.active_id] ? state.active_id : null,
     tabs: tabs.map((tab) => ({
       id: tab.id,
       title: tab.title,

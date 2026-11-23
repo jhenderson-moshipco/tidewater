@@ -65,6 +65,10 @@ type QueryTabState = {
   /** Closes the tab, first asking when that would lose unsaved text or roll back a transaction the user began. */
   requestClose: (id: string) => void;
   closeTab: (id: string) => void;
+  /** Adds a tab whose content another store holds, such as an object editor, and shows it. */
+  addTab: (id: string) => void;
+  /** Takes a tab out of the strip, showing its neighbour when it was the active one. */
+  removeTab: (id: string) => void;
   /** The Rust core closed the tab's idle results on its own. */
   resultsClosed: (id: string) => void;
 };
@@ -229,6 +233,12 @@ export const useQueryTabStore = create<QueryTabState>()((set, get) => {
 
     closeTab: (id) => {
       void api.closeQueryTab(id);
+      get().removeTab(id);
+    },
+
+    addTab: (id) => set((state) => ({ order: [...state.order, id], active_id: id })),
+
+    removeTab: (id) =>
       set((state) => {
         const index = state.order.indexOf(id);
         const order = state.order.filter((candidate) => candidate !== id);
@@ -236,8 +246,7 @@ export const useQueryTabStore = create<QueryTabState>()((set, get) => {
         delete tabs[id];
         const neighbour = order[Math.min(index, order.length - 1)] ?? null;
         return { tabs, order, active_id: state.active_id === id ? neighbour : state.active_id };
-      });
-    },
+      }),
 
     resultsClosed: (id) => {
       const tab = get().tabs[id];

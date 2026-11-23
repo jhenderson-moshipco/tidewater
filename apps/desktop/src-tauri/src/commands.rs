@@ -7,6 +7,8 @@ use crate::connections::probe::{ProbeResult, probe};
 use crate::connections::url::{ParsedConnection, parse_connection_string};
 use crate::connections::{ConnectParams, ConnectionInfo, ConnectionManager};
 use crate::error::CommandError;
+use crate::objects::model::{ChangeOptions, ChangePlan, ObjectDefinition, ObjectRef};
+use crate::objects::{self, ApplyOutcome};
 use crate::files::drafts::{DraftSnapshot, DraftStore, RestoredTabs};
 use crate::files::{self, FileStamp, OpenedFile, SaveOutcome};
 use crate::query::split::{self, StatementSpan};
@@ -169,6 +171,65 @@ pub fn close_query_tab(queries: State<'_, QuerySessions>, tab_id: String) {
     queries.close(&tab_id);
 }
 
+/// The server's connection settings, pointed at `database`.
+fn params_for(store: &Store, server_id: &str, database: &str) -> Result<ConnectParams, CommandError> {
+    let mut params = store.read(|list| Ok(ConnectParams::from(list.find(server_id)?)))?;
+    params.database = database.to_string();
+    Ok(params)
+}
+
+/// The user's schemas in a database, for choosing where an object goes.
+#[tauri::command(rename_all = "snake_case")]
+pub async fn list_schemas(
+    store: State<'_, Store>,
+    connections: State<'_, ConnectionManager>,
+    server_id: String,
+    database: String,
+) -> Result<Vec<String>, CommandError> {
+    let client = connections.client(&server_id, &params_for(&store, &server_id, &database)?).await?;
+    objects::schema_names(&client).await
+}
+
+/// An object's current definition, for its editor.
+#[tauri::command(rename_all = "snake_case")]
+pub async fn object_definition(
+    store: State<'_, Store>,
+    connections: State<'_, ConnectionManager>,
+    server_id: String,
+    object: ObjectRef,
+) -> Result<ObjectDefinition, CommandError> {
+    let client = connections.client(&server_id, &params_for(&store, &server_id, &object.database)?).await?;
+    objects::definition(&client, &object).await
+}
+
+/// The DDL an editor's change needs: a create when there is no original, a drop when there is no change.
+#[tauri::command(rename_all = "snake_case")]
+#[allow(clippy::too_many_arguments)]
+pub async fn plan_object_change(
+    store: State<'_, Store>,
+    connections: State<'_, ConnectionManager>,
+    server_id: String,
+    database: String,
+    object: Option<ObjectRef>,
+    original: Option<ObjectDefinition>,
+    changed: Option<ObjectDefinition>,
+    options: ChangeOptions,
+) -> Result<ChangePlan, CommandError> {
+    let client = connections.client(&server_id, &params_for(&store, &server_id, &database)?).await?;
+    objects::plan(&client, object.as_ref(), original.as_ref(), changed.as_ref(), options).await
+}
+
+/// Runs a plan's statements in one transaction, rolling all of them back if one fails.
+#[tauri::command(rename_all = "snake_case")]
+pub async fn apply_object_change(
+    store: State<'_, Store>,
+    server_id: String,
+    database: String,
+    statements: Vec<String>,
+) -> Result<ApplyOutcome, CommandError> {
+    objects::apply(&params_for(&store, &server_id, &database)?, &statements).await
+}
+
 /// Where the key for the saved servers is kept: a file only this user can read, or the system keychain.
 #[tauri::command(async)]
 pub fn key_storage(store: State<'_, Store>) -> KeyStorage {
@@ -311,14 +372,14 @@ mod tests {
         let app = test_app();
         let with_arguments = [
             "unlock_store", "save_server", "delete_server", "save_group", "delete_group", "test_connection", "connect_server",
-            "disconnect_server", "catalog_children", "run_query", "fetch_more_rows", "cancel_query", "close_query_tab", "cancel_connect",
+            "disconnect_server", "catalog_children", "list_schemas", "object_definition", "plan_object_change", "apply_object_change", "run_query", "fetch_more_rows", "cancel_query", "close_query_tab", "cancel_connect",
             "set_key_storage", "save_tab_drafts",
         ];
 
         for command in ["store_status", "start_fresh_store", "list_servers", "list_connections", "key_storage", "load_tab_drafts"].iter().chain(&with_arguments) {
             assert!(refusal(&no_state, command).starts_with("state not managed"), "{command}");
         }
-        for command in ["delete_server", "connect_server", "catalog_children"] {
+        for command in ["delete_server", "connect_server", "catalog_children", "list_schemas", "object_definition", "plan_object_change"] {
             assert!(refusal(&store_only, command).starts_with("state not managed for field `connections`"), "{command}");
         }
         assert!(refusal(&store_only, "run_query").starts_with("state not managed for field `queries`"));
@@ -498,5 +559,79 @@ mod tests {
         }
         let unreadable = app.invoke("write_sql_file", json!({ "path": "q.sql", "text": "", "expected": "yesterday" }));
         assert!(unreadable.unwrap_err().as_str().unwrap().contains("expected"));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn object_commands_report_unknown_and_unreachable_servers() {
+        let app = test_app();
+        let port = closed_port().await.port;
+        let saved = app.invoke("save_server", json!({ "input": server_input(None, port, json!({ "action": "clear" })) })).unwrap();
+        let object = json!({ "database": "postgres", "object_type": "view", "oid": 1 });
+        let options = json!({ "cascade": false, "with_data": true });
+
+        let calls = [
+            ("list_schemas", json!({ "server_id": saved["id"], "database": "postgres" })),
+            ("object_definition", json!({ "server_id": saved["id"], "object": object })),
+            ("plan_object_change", json!({ "server_id": saved["id"], "database": "postgres", "object": null, "original": null, "changed": null, "options": options })),
+            ("apply_object_change", json!({ "server_id": saved["id"], "database": "postgres", "statements": ["SELECT 1"] })),
+        ];
+        for (command, args) in calls {
+            assert_eq!(app.invoke(command, args).map_err(kind), Err("connection".into()), "{command}");
+        }
+        for (command, args) in [
+            ("list_schemas", json!({ "server_id": "missing", "database": "postgres" })),
+            ("object_definition", json!({ "server_id": "missing", "object": object })),
+            ("plan_object_change", json!({ "server_id": "missing", "database": "postgres", "options": options })),
+            ("apply_object_change", json!({ "server_id": "missing", "database": "postgres", "statements": [] })),
+        ] {
+            assert_eq!(app.invoke(command, args).map_err(kind), Err("not_found".into()), "{command}");
+        }
+
+        for (command, args, missing) in [
+            ("list_schemas", json!({ "server_id": "a" }), "database"),
+            ("object_definition", json!({ "server_id": "a" }), "object"),
+            ("plan_object_change", json!({ "server_id": "a" }), "database"),
+            ("plan_object_change", json!({ "server_id": "a", "database": "b" }), "options"),
+            ("apply_object_change", json!({ "server_id": "a" }), "database"),
+            ("apply_object_change", json!({ "server_id": "a", "database": "b" }), "statements"),
+        ] {
+            let refused = app.invoke(command, args).unwrap_err();
+            assert!(refused.as_str().unwrap().contains(&format!("missing required key {missing}")), "{command}");
+        }
+        let unreadable = app.invoke("plan_object_change", json!({ "server_id": "a", "database": "b", "object": 7, "options": { "cascade": false, "with_data": false } }));
+        assert!(unreadable.unwrap_err().as_str().unwrap().contains("object"));
+        for key in ["original", "changed"] {
+            let args = json!({ "server_id": "a", "database": "b", key: 7, "options": { "cascade": false, "with_data": false } });
+            assert!(app.invoke("plan_object_change", args).unwrap_err().as_str().unwrap().contains(key));
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    #[ignore = "needs TIDEWATER_TEST_DATABASE_URL pointing at a running Postgres"]
+    async fn live_an_object_is_read_planned_and_applied_through_the_commands() {
+        let app = test_app();
+        let live = crate::testing::live_params();
+        let mut input = server_input(None, live.port, json!({ "action": "set", "value": live.password }));
+        input["host"] = json!(live.host);
+        input["user"] = json!(live.user);
+        input["tls"] = json!("require");
+        let id = app.invoke("save_server", json!({ "input": input })).unwrap()["id"].clone();
+        let schema = format!("tw_{}", uuid::Uuid::new_v4().simple());
+        let changed = json!({ "type": "schema", "name": schema, "comment": null });
+        let options = json!({ "cascade": true, "with_data": true });
+
+        let planned = app.invoke("plan_object_change", json!({ "server_id": id, "database": live.database, "object": null, "original": null, "changed": changed, "options": options })).unwrap();
+        let applied = app.invoke("apply_object_change", json!({ "server_id": id, "database": live.database, "statements": planned["statements"] })).unwrap();
+        let schemas = app.invoke("list_schemas", json!({ "server_id": id, "database": live.database })).unwrap();
+        let oid = app.invoke("catalog_children", json!({ "server_id": id, "path": { "level": "database", "database": live.database }, "show_system": false })).unwrap()
+            .as_array().unwrap().iter().find(|node| node["label"] == json!(schema)).unwrap()["object"].clone();
+        let read = app.invoke("object_definition", json!({ "server_id": id, "object": oid })).unwrap();
+        let dropped = app.invoke("plan_object_change", json!({ "server_id": id, "database": live.database, "object": oid, "original": read, "changed": null, "options": options })).unwrap();
+        app.invoke("apply_object_change", json!({ "server_id": id, "database": live.database, "statements": dropped["statements"] })).unwrap();
+
+        assert_eq!(applied, json!({ "outcome": "applied" }));
+        assert!(schemas.as_array().unwrap().contains(&json!(schema)));
+        assert_eq!(read, changed);
+        assert_eq!(dropped["statements"], json!([format!("DROP SCHEMA {schema} CASCADE")]));
     }
 }

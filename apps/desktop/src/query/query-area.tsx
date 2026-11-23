@@ -1,3 +1,5 @@
+import { ObjectEditorView } from '../objects/object-editor';
+import { useObjectEditorStore } from '../store/object-editors';
 import { useQueryTabStore } from '../store/query-tabs';
 import { QueryTabStrip, query_panel_id, queryTabId } from './query-tab-strip';
 import { QueryToolbar } from './query-toolbar';
@@ -5,15 +7,24 @@ import { ResultsPanel } from './results-panel';
 import { SqlEditor } from './sql-editor';
 import classes from './query.module.css';
 
-function ActiveTab({ tab_id }: { tab_id: string }) {
+function QueryTabContent({ tab_id }: { tab_id: string }) {
   const title = useQueryTabStore((state) => state.tabs[tab_id]?.title ?? '');
   return (
-    <div role="tabpanel" id={query_panel_id} aria-labelledby={queryTabId(tab_id)} className={classes.tabPanel}>
+    <>
       <QueryToolbar tab_id={tab_id} />
       <div className={classes.editorPane}>
         <SqlEditor key={tab_id} model={{ tab_id, title }} />
       </div>
       <ResultsPanel tab_id={tab_id} />
+    </>
+  );
+}
+
+function ActiveTab({ tab_id }: { tab_id: string }) {
+  const is_editor = useObjectEditorStore((state) => state.editors[tab_id] !== undefined);
+  return (
+    <div role="tabpanel" id={query_panel_id} aria-labelledby={queryTabId(tab_id)} className={classes.tabPanel}>
+      {is_editor ? <ObjectEditorView model={{ editor_id: tab_id, title_id: `${tab_id}-heading` }} /> : <QueryTabContent tab_id={tab_id} />}
     </div>
   );
 }

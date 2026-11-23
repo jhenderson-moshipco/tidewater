@@ -2,9 +2,10 @@ import { act, fireEvent, screen } from '@testing-library/react';
 import { describe, expect, it, vi } from 'vitest';
 import { childrenKey, groupRowId, nodeRowId, serverRowId } from './tree-rows';
 import { useDialogStore } from '../store/dialogs';
+import { useObjectEditorStore, type EditorRequest } from '../store/object-editors';
 import { useServerStore } from '../store/servers';
 import { useTreeStore } from '../store/tree';
-import { catalogNode, commandsOf, group, mockCommands, server } from '../testing/backend';
+import { catalogNode, commandsOf, group, mockCommands, objectRef, server } from '../testing/backend';
 import { renderWithUser } from '../testing/render';
 import { ServerTree } from './server-tree';
 
@@ -237,5 +238,100 @@ describe('the server tree', () => {
     useServerStore.setState({ servers: [server()], connections: { 'orders-dev': { status: 'failed', message: 'refused' } } });
     renderWithUser(<ServerTree />);
     expect(item(/^orders-dev/).textContent).toBe('orders-devDEVFailed');
+  });
+});
+
+describe('editing objects from the tree', () => {
+  const schema_ref = objectRef({ object_type: 'schema', oid: 2200 });
+  const view_ref = objectRef();
+  const folder = (kind: 'view' | 'table') => ({ level: 'folder', database: 'orders', schema_oid: 2200, kind }) as const;
+
+  /** orders-dev open down to a view in public's Views folder, beside a Tables folder the editors don't cover yet. */
+  function objectTree() {
+    useServerStore.setState({ servers: [server()], connections: { 'orders-dev': { status: 'connected', info } } });
+    const db = 'db:orders';
+    const schema = `${db}/schema:2200`;
+    useTreeStore.setState({
+      expanded: {
+        [serverRowId('orders-dev')]: true,
+        [nodeRowId('orders-dev', db)]: true,
+        [nodeRowId('orders-dev', schema)]: true,
+        [nodeRowId('orders-dev', `${schema}/View`)]: true,
+      },
+      children: {
+        [childrenKey('orders-dev')]: { status: 'loaded', path: null, nodes: [catalogNode(db, 'orders', orders_path)] },
+        [childrenKey('orders-dev', db)]: {
+          status: 'loaded',
+          path: orders_path,
+          nodes: [catalogNode(schema, 'public', { level: 'schema', database: 'orders', schema_oid: 2200 }, null, schema_ref)],
+        },
+        [childrenKey('orders-dev', schema)]: {
+          status: 'loaded',
+          path: { level: 'schema', database: 'orders', schema_oid: 2200 },
+          nodes: [catalogNode(`${schema}/Table`, 'Tables', folder('table'), '0'), catalogNode(`${schema}/View`, 'Views', folder('view'), '1')],
+        },
+        [childrenKey('orders-dev', `${schema}/View`)]: {
+          status: 'loaded',
+          path: folder('view'),
+          nodes: [catalogNode(`${db}/rel:16400`, 'open_orders', null, null, view_ref)],
+        },
+      },
+    });
+  }
+
+  function spyOnOpen() {
+    const open = vi.fn((_request: EditorRequest) => 'editor-a');
+    useObjectEditorStore.setState({ open });
+    return open;
+  }
+
+  it('names the shortcuts each row answers to: F2 and Delete on an object, Insert where something can be created', () => {
+    objectTree();
+    renderWithUser(<ServerTree />);
+
+    const shortcuts = [/^orders$/, /^public/, /^Tables/, /^Views/, /^open_orders/].map((label) => item(label).getAttribute('aria-keyshortcuts'));
+
+    expect(shortcuts).toEqual(['Insert', 'F2 Delete', null, 'Insert', 'F2 Delete']);
+    expect(screen.queryByRole('button', { name: /Edit|New/ })).toBeNull();
+  });
+
+  it('opens the editor with F2, a new object in the folder schema with Insert, and a drop with Delete', () => {
+    objectTree();
+    const open = spyOnOpen();
+    renderWithUser(<ServerTree />);
+    const press = (label: RegExp, key: string) => {
+      act(() => useTreeStore.setState({ active_id: item(label).id.slice('tree-row-'.length) }));
+      fireEvent.keyDown(tree(), { key });
+    };
+
+    press(/^open_orders/, 'F2');
+    press(/^Views/, 'Insert');
+    press(/^open_orders/, 'Backspace');
+    press(/^orders$/, 'Insert');
+    press(/^Tables/, 'Insert');
+    press(/^Tables/, 'F2');
+    press(/^Tables/, 'Delete');
+
+    expect(open.mock.calls.map(([request]) => [request.mode, request.object_type, request.schema])).toEqual([
+      ['edit', 'view', null],
+      ['create', 'view', 'public'],
+      ['drop', 'view', null],
+      ['create', 'schema', null],
+    ]);
+    expect(open.mock.calls[0]?.[0]).toMatchObject({ server_id: 'orders-dev', database: 'orders', object: view_ref, label: 'open_orders' });
+  });
+
+  it('opens editors from the pencil and +, selecting their row first', async () => {
+    objectTree();
+    const open = spyOnOpen();
+    const { user } = renderWithUser(<ServerTree />);
+
+    await user.click(item(/^open_orders/).querySelector('[title="Edit (F2)"]') as HTMLElement);
+    expect(active()).toBe(`tree-row-${nodeRowId('orders-dev', 'db:orders/rel:16400')}`);
+    await user.click(item(/^Views/).querySelector('[title="New view (Insert)"]') as HTMLElement);
+
+    expect(open.mock.calls.map(([request]) => request.mode)).toEqual(['edit', 'create']);
+    expect(active()).toBe(`tree-row-${nodeRowId('orders-dev', 'db:orders/schema:2200/View')}`);
+    expect(item(/^Tables/).querySelector('[title]')).toBeNull();
   });
 });

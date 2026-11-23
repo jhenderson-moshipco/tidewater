@@ -61,6 +61,8 @@ pub enum FakeServer {
     FailFirstQuery,
     /// Reads the startup message and never answers.
     Silent,
+    /// Signs the client in, then hangs up on its first query.
+    HangUpOnQuery,
 }
 
 fn message(tag: u8, body: &[u8]) -> Vec<u8> {
@@ -103,6 +105,13 @@ async fn answer(mut socket: TcpStream, behaviour: FakeServer) {
             failed
         }
         FakeServer::Silent => Vec::new(),
+        FakeServer::HangUpOnQuery => {
+            let mut signed_in = message(b'R', &0i32.to_be_bytes());
+            signed_in.extend(message(b'Z', b"I"));
+            socket.write_all(&signed_in).await.unwrap();
+            let _ = socket.read(&mut [0u8; 1024]).await.unwrap();
+            return;
+        }
     };
     socket.write_all(&reply).await.unwrap();
     let _ = socket.read(&mut [0u8; 1024]).await;

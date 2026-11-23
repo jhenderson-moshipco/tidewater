@@ -28,7 +28,8 @@ export type OpenDialog =
   | { kind: 'close-tab'; tab_id: string; title: string; transaction: 'open' | 'failed' }
   | { kind: 'settings' }
   | { kind: 'unsaved-tab'; tab_id: string; title: string; transaction: 'open' | 'failed' | null }
-  | { kind: 'overwrite-file'; tab_id: string; title: string; then_close: boolean };
+  | { kind: 'overwrite-file'; tab_id: string; title: string; then_close: boolean }
+  | { kind: 'object-editor'; editor_id: string };
 
 type DialogState = {
   open: OpenDialog | null;

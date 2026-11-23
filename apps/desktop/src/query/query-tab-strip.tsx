@@ -3,6 +3,7 @@ import type { KeyboardEvent } from 'react';
 import server_classes from '../servers/servers.module.css';
 import { environmentLabel } from '../servers/connection-form';
 import { restoreFocusIfLost } from '../shell/focus';
+import { editorTitle, isDirty, useObjectEditorStore } from '../store/object-editors';
 import { isUnsaved, useQueryTabStore, type QueryTab } from '../store/query-tabs';
 import { useServerStore } from '../store/servers';
 import { openNewTab } from './open-tab';
@@ -14,8 +15,24 @@ export function queryTabId(id: string): string {
   return `${id}-tab`;
 }
 
+/** Closes a query tab or an object editor's tab, each asking first when that would lose changes. */
+function requestClose(id: string): void {
+  const editors = useObjectEditorStore.getState();
+  if (editors.editors[id]) editors.requestClose(id);
+  else useQueryTabStore.getState().requestClose(id);
+}
+
+/** What the strip shows for a tab, from whichever store holds it. */
+function useTabSummary(id: string): { title: string; unsaved: boolean; server_id: string | null } {
+  const query = useQueryTabStore((state) => state.tabs[id]);
+  const editor = useObjectEditorStore((state) => state.editors[id]);
+  if (editor) return { title: editorTitle(editor), unsaved: isDirty(editor), server_id: editor.server_id };
+  const tab = query as QueryTab;
+  return { title: tab.title, unsaved: isUnsaved(tab), server_id: tab.connection?.server_id ?? null };
+}
+
 function moveFocus(event: KeyboardEvent<HTMLButtonElement>, index: number) {
-  const { order, selectTab, requestClose } = useQueryTabStore.getState();
+  const { order, selectTab } = useQueryTabStore.getState();
   if (event.key === 'Delete') {
     event.preventDefault();
     requestClose(order[index] as string);
@@ -32,9 +49,7 @@ function moveFocus(event: KeyboardEvent<HTMLButtonElement>, index: number) {
 }
 
 function TabButton({ model }: { model: { id: string; index: number; active: boolean } }) {
-  const title = useQueryTabStore((state) => state.tabs[model.id]?.title ?? '');
-  const unsaved = useQueryTabStore((state) => isUnsaved(state.tabs[model.id] as QueryTab));
-  const server_id = useQueryTabStore((state) => state.tabs[model.id]?.connection?.server_id ?? null);
+  const { title, unsaved, server_id } = useTabSummary(model.id);
   const environment = useServerStore((state) => state.servers.find((server) => server.id === server_id)?.environment ?? null);
 
   return (
@@ -71,7 +86,7 @@ function TabButton({ model }: { model: { id: string; index: number; active: bool
         tabIndex={model.active ? 0 : -1}
         className={server_classes.iconButton}
         onClick={() => {
-          useQueryTabStore.getState().requestClose(model.id);
+          requestClose(model.id);
           restoreFocusIfLost();
         }}
       >

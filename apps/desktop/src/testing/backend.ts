@@ -3,6 +3,7 @@ import type { InvokeArgs } from '@tauri-apps/api/core';
 import type { CatalogNode, CatalogPath } from '../generated/catalog';
 import type { CommandError } from '../generated/errors';
 import type { TabDraft } from '../generated/drafts';
+import type { ChangePlan, ObjectDefinition, ObjectRef } from '../generated/objects';
 import type { QueryError, RunResult, StatementOutcome, StatementResult } from '../generated/query';
 import type { ServerGroup, ServerInput, ServerSummary } from '../generated/servers';
 import type { StoreStatusView } from '../generated/store';
@@ -87,8 +88,14 @@ export function deferred<T>(): { promise: Promise<T>; resolve: (value: T) => voi
   return { promise, resolve };
 }
 
-export function catalogNode(key: string, label: string, children: CatalogPath | null = null, detail: string | null = null): CatalogNode {
-  return { key, label, detail, icon: children?.level === 'database' ? 'database' : 'table', children };
+export function catalogNode(
+  key: string,
+  label: string,
+  children: CatalogPath | null = null,
+  detail: string | null = null,
+  object: ObjectRef | null = null,
+): CatalogNode {
+  return { key, label, detail, icon: children?.level === 'database' ? 'database' : 'table', children, object };
 }
 
 export function rowsOutcome(rows: Array<Array<string | null>>, overrides: Partial<Extract<StatementOutcome, { kind: 'rows' }>> = {}): StatementOutcome {
@@ -120,4 +127,35 @@ export function draft(overrides: Partial<TabDraft> = {}): TabDraft {
     file: null,
     ...overrides,
   };
+}
+
+export function objectRef(overrides: Partial<ObjectRef> = {}): ObjectRef {
+  return { database: 'orders', object_type: 'view', oid: 16_400, ...overrides };
+}
+
+export function viewDefinition(overrides: Partial<Extract<ObjectDefinition, { type: 'view' }>> = {}): ObjectDefinition {
+  return { type: 'view', schema: 'public', name: 'open_orders', query: 'SELECT id FROM orders', comment: null, ...overrides };
+}
+
+export function routineDefinition(overrides: Partial<Extract<ObjectDefinition, { type: 'routine' }>> = {}): ObjectDefinition {
+  return {
+    type: 'routine',
+    procedure: false,
+    schema: 'public',
+    name: 'apply_discount',
+    arguments: 'p_id bigint, p_pct numeric DEFAULT 10',
+    identity_arguments: 'p_id bigint, p_pct numeric',
+    returns: 'numeric',
+    language: 'plpgsql',
+    volatility: 'volatile',
+    security_definer: false,
+    parallel: 'unsafe',
+    body: 'BEGIN\n  RETURN 1;\nEND',
+    comment: 'Takes a percentage off',
+    ...overrides,
+  };
+}
+
+export function changePlan(overrides: Partial<ChangePlan> = {}): ChangePlan {
+  return { statements: ['CREATE OR REPLACE VIEW public.open_orders AS SELECT id, total FROM orders'], warnings: [], dependents: [], ...overrides };
 }

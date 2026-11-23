@@ -19,7 +19,8 @@ const highlight_style = HighlightStyle.define([
   { tag: [tags.lineComment, tags.blockComment], color: 'var(--tw-syntax-comment)', fontStyle: 'italic' },
 ]);
 
-const theme = EditorView.theme({
+/** The editor look shared by every SQL field. */
+export const sql_theme = EditorView.theme({
   '&': { height: '100%', backgroundColor: 'var(--tw-bg-editor)', color: 'var(--tw-text)' },
   '&.cm-focused': { outline: '2px solid var(--tw-accent)', outlineOffset: '-2px' },
   '.cm-scroller': { fontFamily: 'var(--tw-font-mono)', fontSize: 'var(--tw-font-size)', lineHeight: '20px' },
@@ -31,6 +32,8 @@ const theme = EditorView.theme({
   '&.cm-focused .cm-selectionBackground, .cm-selectionBackground': { backgroundColor: 'var(--tw-selected)' },
 });
 
+export const sql_highlighting = syntaxHighlighting(highlight_style);
+
 function extensions(tab_id: string, title: string): Array<Extension> {
   const tabs = () => useQueryTabStore.getState();
   return [
@@ -40,8 +43,8 @@ function extensions(tab_id: string, title: string): Array<Extension> {
     highlightActiveLine(),
     bracketMatching(),
     sql({ dialect: PostgreSQL }),
-    syntaxHighlighting(highlight_style),
-    theme,
+    sql_highlighting,
+    sql_theme,
     keymap.of([
       { key: 'Mod-Enter', run: () => (void tabs().run(tab_id, 'statement'), true) },
       { key: 'Shift-Mod-Enter', run: () => (void tabs().run(tab_id, 'all'), true) },

@@ -25,7 +25,7 @@ describe('the workspace', () => {
 
   it('counts connected servers in the status bar', () => {
     renderWithUser(<Workspace />);
-    const status = () => screen.getByRole('status').textContent;
+    const status = () => within(screen.getByRole('contentinfo')).getByRole('status').textContent;
     expect(status()).toBe('No connection');
 
     act(() => useServerStore.setState({ connections: { a: { status: 'connected', info }, b: { status: 'connecting', started: 0 } } }));

@@ -22,6 +22,8 @@ type TreeState = {
   expandRow: (row: TreeRow) => Promise<void>;
   collapseRow: (row: TreeRow) => void;
   refreshRow: (row: TreeRow) => Promise<void>;
+  /** Reloads every listing shown under a database in place, as after a change to its objects. */
+  refreshDatabase: (server_id: string, database: string) => Promise<void>;
   toggleSystem: () => void;
   forgetServer: (server_id: string) => void;
 };
@@ -33,9 +35,10 @@ function without<T>(record: Readonly<Record<string, T>>, drop: (key: string) => 
 export const useTreeStore = create<TreeState>()(
   persist(
     (set, get) => {
-      const load = async (server_id: string, node_key: string, path: CatalogPath | null) => {
+      /** Loads a node's children; `in_place` keeps the current ones on screen until the new ones arrive. */
+      const load = async (server_id: string, node_key: string, path: CatalogPath | null, in_place = false) => {
         const key = childrenKey(server_id, node_key);
-        set((state) => ({ children: { ...state.children, [key]: { status: 'loading', path } } }));
+        if (!in_place) set((state) => ({ children: { ...state.children, [key]: { status: 'loading', path } } }));
         try {
           const nodes = await catalogChildren(server_id, path, get().show_system);
           set((state) => ({ children: { ...state.children, [key]: { status: 'loaded', path, nodes } } }));
@@ -180,6 +183,14 @@ export const useTreeStore = create<TreeState>()(
             set((state) => ({ children: without(state.children, (candidate) => candidate === key || candidate.startsWith(`${key}/`)) }));
             if (row.expanded) await load(item.server_id, item.node.key, item.node.children);
           }
+        },
+
+        refreshDatabase: async (server_id, database) => {
+          const database_key = childrenKey(server_id, `db:${database}`);
+          const listings = Object.entries(get().children).filter(
+            ([key, loaded]) => (key === database_key || key.startsWith(`${database_key}/`)) && loaded.status !== 'loading',
+          );
+          await Promise.all(listings.map(([key, loaded]) => load(server_id, key.slice(server_id.length + 1), loaded.path, true)));
         },
 
         toggleSystem: () => {

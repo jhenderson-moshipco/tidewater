@@ -304,3 +304,34 @@ describe('reopening servers at launch', () => {
   });
 });
 
+
+describe('refreshing a database after a change to its objects', () => {
+  it("reloads every listing under the database in place, leaving other databases' and loading ones alone", async () => {
+    const public_path: CatalogPath = { level: 'schema', database: 'orders', schema_oid: 2200 };
+    const postgres_path: CatalogPath = { level: 'database', database: 'postgres' };
+    useTreeStore.setState({
+      children: {
+        [childrenKey('orders-dev', 'db:orders')]: { status: 'loaded', path: orders_path, nodes: [] },
+        [childrenKey('orders-dev', 'db:orders/schema:2200')]: { status: 'loaded', path: public_path, nodes: [] },
+        [childrenKey('orders-dev', 'db:orders/schema:2200/View')]: { status: 'loading', path: public_path },
+        [childrenKey('orders-dev', 'db:postgres')]: { status: 'loaded', path: postgres_path, nodes: [] },
+      },
+    });
+    const seen: Array<string | undefined> = [];
+    const calls = mockCommands({
+      catalog_children: (args) => {
+        seen.push(tree().children[childrenKey('orders-dev', 'db:orders')]?.status);
+        return (args.path as CatalogPath).level === 'database' ? schemas : [];
+      },
+    });
+
+    await tree().refreshDatabase('orders-dev', 'orders');
+
+    expect(calls.map((call) => call.args)).toEqual([
+      { server_id: 'orders-dev', path: orders_path, show_system: false },
+      { server_id: 'orders-dev', path: public_path, show_system: false },
+    ]);
+    expect(seen).toEqual(['loaded', 'loaded']);
+    expect(tree().children[childrenKey('orders-dev', 'db:orders')]).toEqual({ status: 'loaded', path: orders_path, nodes: schemas });
+  });
+});

@@ -6,6 +6,7 @@ mod connections;
 mod error;
 mod files;
 mod menu;
+mod objects;
 mod query;
 mod servers;
 #[cfg(test)]
@@ -60,6 +61,10 @@ fn with_commands<R: Runtime>(builder: Builder<R>) -> Builder<R> {
             commands::disconnect_server,
             commands::list_connections,
             commands::catalog_children,
+            commands::list_schemas,
+            commands::object_definition,
+            commands::plan_object_change,
+            commands::apply_object_change,
             commands::split_statements,
             commands::run_query,
             commands::fetch_more_rows,
