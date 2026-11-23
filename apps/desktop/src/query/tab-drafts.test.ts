@@ -71,6 +71,13 @@ describe('saving drafts', () => {
     expect(draftSnapshot(tabs())).toEqual({ active_id: id, tabs: [draft({ id, selection_from: 1, selection_to: 4 })] });
   });
 
+  it("leaves out an object editor's tab, and saves no active tab while one is in front", () => {
+    const id = tabs().openTab({ server_id: 'orders-dev', database: 'orders' }, { text: 'SELECT 1', selection: { from: 3, to: 3 } });
+    tabs().addTab('editor-a');
+
+    expect(draftSnapshot(tabs())).toEqual({ active_id: null, tabs: [draft({ id })] });
+  });
+
   it('is not started outside the Tauri app', () => {
     expect(() => startSavingDrafts()).not.toThrow();
   });

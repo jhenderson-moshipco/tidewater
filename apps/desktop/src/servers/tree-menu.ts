@@ -1,9 +1,12 @@
 import { isTauri } from '@tauri-apps/api/core';
 import { LogicalPosition } from '@tauri-apps/api/dpi';
 import { Menu } from '@tauri-apps/api/menu';
+import { capitalized, type_labels } from '../objects/describe';
+import { createFromRow, creatableObject, dropRow, editRow, editableObject } from '../objects/open-editor';
 import { useDialogStore } from '../store/dialogs';
 import { useServerStore } from '../store/servers';
 import { useTreeStore } from '../store/tree';
+import { useWorkspaceStore } from '../store/workspace';
 import type { TreeRow } from './tree-rows';
 
 type MenuEntry = { text: string; action: () => void; enabled?: boolean } | 'separator';
@@ -23,6 +26,33 @@ export async function disconnectServer(server_id: string, name: string): Promise
   await useServerStore.getState().disconnect(server_id);
   useTreeStore.getState().forgetServer(server_id);
   useTreeStore.setState({ announcement: `Disconnected from ${name}` });
+}
+
+function titleCase(text: string): string {
+  return text.split(' ').map(capitalized).join(' ');
+}
+
+/** A node's entries for editing, dropping or creating objects, each also offered in the place Settings doesn't pick. */
+function editorEntries(row: TreeRow, rows: ReadonlyArray<TreeRow>): Array<MenuEntry> {
+  const other = useWorkspaceStore.getState().object_editor_host === 'dialog' ? 'tab' : 'dialog';
+  const in_other = other === 'tab' ? 'in Tab' : 'in Dialog';
+  const entries: Array<MenuEntry> = [];
+  if (editableObject(row)) {
+    entries.push(
+      { text: 'Edit…', action: () => editRow(row) },
+      { text: `Edit ${in_other}`, action: () => editRow(row, other) },
+      { text: 'Drop…', action: () => dropRow(row) },
+    );
+  }
+  const created = creatableObject(row, rows);
+  if (created) {
+    const type = titleCase(type_labels[created.object_type]);
+    entries.push(
+      { text: `New ${type}…`, action: () => createFromRow(row, rows) },
+      { text: `New ${type} ${in_other}`, action: () => createFromRow(row, rows, other) },
+    );
+  }
+  return entries.length > 0 ? [...entries, 'separator'] : entries;
 }
 
 /** The context menu entries for a row; the same actions the keyboard shortcuts reach. */
@@ -56,6 +86,7 @@ export function rowMenu(row: TreeRow, rows: ReadonlyArray<TreeRow>): Array<MenuE
     }
     case 'node':
       return [
+        ...editorEntries(row, rows),
         { text: 'Refresh', enabled: item.node.children !== null, action: () => void tree.refreshRow(row) },
         { text: 'Copy Name', action: () => void navigator.clipboard.writeText(item.node.label) },
       ];

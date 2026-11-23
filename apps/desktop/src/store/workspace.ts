@@ -2,6 +2,8 @@ import { create } from 'zustand';
 import { createJSONStorage, persist } from 'zustand/middleware';
 
 export type WorkspaceView = 'explorer' | 'search' | 'files' | 'history' | 'performance';
+/** Where an object editor opens unless the user picks the other place. */
+export type EditorHost = 'dialog' | 'tab';
 
 export const sidebar_widths = { min: 200, max: 640, initial: 272 } as const;
 export const results_heights = { min: 120, max: 800, initial: 320 } as const;
@@ -18,6 +20,8 @@ type WorkspaceState = {
   setSidebarWidth: (width: number) => void;
   results_height: number;
   setResultsHeight: (height: number) => void;
+  object_editor_host: EditorHost;
+  setObjectEditorHost: (host: EditorHost) => void;
 };
 
 export function clampSidebarWidth(width: number): number {
@@ -44,11 +48,17 @@ export const useWorkspaceStore = create<WorkspaceState>()(
       setSidebarWidth: (width) => set({ sidebar_width: clampSidebarWidth(width) }),
       results_height: results_heights.initial,
       setResultsHeight: (height) => set({ results_height: clampResultsHeight(height) }),
+      object_editor_host: 'dialog',
+      setObjectEditorHost: (host) => set({ object_editor_host: host }),
     }),
     {
       name: 'tidewater-workspace',
       storage: createJSONStorage(() => localStorage),
-      partialize: (state) => ({ sidebar_width: state.sidebar_width, results_height: state.results_height }),
+      partialize: (state) => ({
+        sidebar_width: state.sidebar_width,
+        results_height: state.results_height,
+        object_editor_host: state.object_editor_host,
+      }),
     },
   ),
 );

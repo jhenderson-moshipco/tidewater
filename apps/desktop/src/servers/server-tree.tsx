@@ -9,6 +9,8 @@ import {
   IconFolder,
   IconListNumbers,
   IconMathFunction,
+  IconPencil,
+  IconPlus,
   IconPuzzle,
   IconSchema,
   IconTable,
@@ -19,6 +21,8 @@ import {
 } from '@tabler/icons-react';
 import { useState, type KeyboardEvent, type MouseEvent, type UIEvent } from 'react';
 import type { NodeIcon } from '../generated/catalog';
+import { type_labels } from '../objects/describe';
+import { createFromRow, creatableObject, dropRow, editRow, editableObject } from '../objects/open-editor';
 import { useDialogStore } from '../store/dialogs';
 import { useExplorerStore } from '../store/explorer';
 import { useServerStore, type ConnectionState } from '../store/servers';
@@ -125,7 +129,56 @@ function shortcut(event: KeyboardEvent<HTMLDivElement>, row: TreeRow, rows: Read
     dialogs.show({ kind: 'delete-group', group: item.group, server_count: item.server_count });
     return true;
   }
+  return objectShortcut(event.key, row, rows);
+}
+
+/** F2 edits a row's object, Insert creates one under it, and Delete or Backspace drops it. */
+function objectShortcut(key: string, row: TreeRow, rows: ReadonlyArray<TreeRow>): boolean {
+  if (key === 'F2') return editRow(row);
+  if (key === 'Insert') return createFromRow(row, rows);
+  if (key === 'Delete' || key === 'Backspace') return dropRow(row);
   return false;
+}
+
+/** The shortcuts a row answers to beyond moving and opening, for `aria-keyshortcuts`. */
+function rowShortcuts(row: TreeRow, rows: ReadonlyArray<TreeRow>): string | undefined {
+  const keys = [
+    row.item.type === 'server' && row.item.connection?.status === 'connecting' && 'Escape',
+    editableObject(row) && 'F2 Delete',
+    creatableObject(row, rows) && 'Insert',
+  ].filter(Boolean);
+  return keys.length > 0 ? keys.join(' ') : undefined;
+}
+
+/**
+ * The pencil and + a row shows while hovered or selected. They repeat F2 and Insert for the pointer, so they stay
+ * out of the tab order and the accessibility tree, as the tree is one tab stop.
+ */
+function RowActions({ row, rows }: { row: TreeRow; rows: ReadonlyArray<TreeRow> }) {
+  const created = creatableObject(row, rows);
+  const editable = editableObject(row) !== null;
+  if (!created && !editable) return null;
+  const run = (event: MouseEvent<HTMLElement>, action: () => void) => {
+    event.stopPropagation();
+    useTreeStore.getState().setActive(row.id);
+    event.currentTarget.closest<HTMLElement>('[role="tree"]')?.focus();
+    action();
+  };
+
+  return (
+    <span aria-hidden className={classes.rowActions}>
+      {created && (
+        <span className={classes.rowAction} title={`New ${type_labels[created.object_type]} (Insert)`} onClick={(event) => run(event, () => createFromRow(row, rows))}>
+          <IconPlus size={14} />
+        </span>
+      )}
+      {editable && (
+        <span className={classes.rowAction} title="Edit (F2)" onClick={(event) => run(event, () => editRow(row))}>
+          <IconPencil size={14} />
+        </span>
+      )}
+    </span>
+  );
 }
 
 function RowLead({ row }: { row: TreeRow }) {
@@ -243,7 +296,7 @@ export function ServerTree() {
               aria-posinset={row.posinset}
               aria-expanded={row.expandable ? row.expanded : undefined}
               aria-selected={row.id === active?.id}
-              aria-keyshortcuts={row.item.type === 'server' && row.item.connection?.status === 'connecting' ? 'Escape' : undefined}
+              aria-keyshortcuts={rowShortcuts(row, rows)}
               data-active={row.id === active?.id}
               data-kind={row.item.type}
               className={classes.row}
@@ -272,6 +325,7 @@ export function ServerTree() {
               <RowLead row={row} />
               <span className={classes.rowLabel}>{row.label}</span>
               <RowTrail row={row} />
+              <RowActions row={row} rows={rows} />
             </div>
           ))}
         </div>

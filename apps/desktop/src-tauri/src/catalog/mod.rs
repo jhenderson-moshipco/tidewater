@@ -4,6 +4,8 @@ use serde::{Deserialize, Serialize};
 use tokio_postgres::Client;
 use ts_rs::TS;
 
+use crate::objects::model::{ObjectRef, ObjectType};
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "snake_case")]
 #[ts(export, export_to = "catalog.ts")]
@@ -71,10 +73,17 @@ pub struct CatalogNode {
     pub detail: Option<String>,
     pub icon: NodeIcon,
     pub children: Option<CatalogPath>,
+    /// The object an editor can open for this node, when it is a kind the editors cover.
+    pub object: Option<ObjectRef>,
 }
 
 fn node(key: String, label: impl Into<String>, detail: Option<String>, icon: NodeIcon, children: Option<CatalogPath>) -> CatalogNode {
-    CatalogNode { key, label: label.into(), detail, icon, children }
+    CatalogNode { key, label: label.into(), detail, icon, children, object: None }
+}
+
+fn editable(mut node: CatalogNode, database: &str, object_type: Option<ObjectType>, oid: u32) -> CatalogNode {
+    node.object = object_type.map(|object_type| ObjectRef { database: database.to_string(), object_type, oid });
+    node
 }
 
 const FOLDERS: [(ObjectKind, &str); 7] = [
@@ -111,7 +120,7 @@ WHERE relnamespace = $1 AND relkind = ANY($2) AND NOT relispartition
 ORDER BY relname";
 
 const ROUTINES: &str = "\
-SELECT oid, proname, pg_get_function_identity_arguments(oid) FROM pg_proc
+SELECT oid, proname, pg_get_function_identity_arguments(oid), prokind <> 'a' FROM pg_proc
 WHERE pronamespace = $1 AND prokind = ANY($2)
 ORDER BY proname, 3";
 
@@ -192,6 +201,7 @@ async fn relations(
     codes: &[u8],
     icon: NodeIcon,
     expandable: bool,
+    object_type: Option<ObjectType>,
 ) -> Result<Vec<CatalogNode>, tokio_postgres::Error> {
     let rows = client.query(RELATIONS, &[&schema_oid, &char_codes(codes)]).await?;
     Ok(rows
@@ -202,13 +212,21 @@ async fn relations(
             let partitioned: bool = row.get(2);
             let children = expandable.then(|| CatalogPath::Relation { database: database.to_string(), oid, partitioned });
             let icon = if partitioned { NodeIcon::PartitionedTable } else { icon };
-            node(format!("db:{database}/rel:{oid}"), name, partitioned.then(|| "partitioned".to_string()), icon, children)
+            let found = node(format!("db:{database}/rel:{oid}"), name, partitioned.then(|| "partitioned".to_string()), icon, children);
+            editable(found, database, object_type, oid)
         })
         .collect())
 }
 
 /// The schema's routines whose `prokind` is one of `codes`, labelled with their arguments.
-async fn routines(client: &Client, database: &str, schema_oid: u32, codes: &[u8], icon: NodeIcon) -> Result<Vec<CatalogNode>, tokio_postgres::Error> {
+async fn routines(
+    client: &Client,
+    database: &str,
+    schema_oid: u32,
+    codes: &[u8],
+    icon: NodeIcon,
+    object_type: ObjectType,
+) -> Result<Vec<CatalogNode>, tokio_postgres::Error> {
     let rows = client.query(ROUTINES, &[&schema_oid, &char_codes(codes)]).await?;
     Ok(rows
         .iter()
@@ -216,7 +234,9 @@ async fn routines(client: &Client, database: &str, schema_oid: u32, codes: &[u8]
             let oid: u32 = row.get(0);
             let name: String = row.get(1);
             let arguments: String = row.get(2);
-            node(format!("db:{database}/proc:{oid}"), format!("{name}({arguments})"), None, icon, None)
+            let editable_kind: bool = row.get(3);
+            let found = node(format!("db:{database}/proc:{oid}"), format!("{name}({arguments})"), None, icon, None);
+            editable(found, database, editable_kind.then_some(object_type), oid)
         })
         .collect())
 }
@@ -233,13 +253,14 @@ pub async fn children(client: &Client, path: &CatalogPath, show_system: bool) ->
                 .map(|row| {
                     let schema_oid: u32 = row.get(0);
                     let name: String = row.get(1);
-                    node(
+                    let found = node(
                         format!("{prefix}/schema:{schema_oid}"),
                         name,
                         None,
                         NodeIcon::Schema,
                         Some(CatalogPath::Schema { database: database.clone(), schema_oid }),
-                    )
+                    );
+                    editable(found, &database, Some(ObjectType::Schema), schema_oid)
                 })
                 .collect();
             nodes.push(node(format!("{prefix}/extensions"), "Extensions", None, NodeIcon::Folder, Some(CatalogPath::Extensions { database })));
@@ -274,12 +295,14 @@ pub async fn children(client: &Client, path: &CatalogPath, show_system: bool) ->
                 .collect())
         }
         CatalogPath::Folder { schema_oid, kind, .. } => match kind {
-            ObjectKind::Table => relations(client, &database, *schema_oid, b"rp", NodeIcon::Table, true).await,
-            ObjectKind::View => relations(client, &database, *schema_oid, b"v", NodeIcon::View, true).await,
-            ObjectKind::MaterializedView => relations(client, &database, *schema_oid, b"m", NodeIcon::MaterializedView, true).await,
-            ObjectKind::Sequence => relations(client, &database, *schema_oid, b"S", NodeIcon::Sequence, false).await,
-            ObjectKind::Function => routines(client, &database, *schema_oid, b"faw", NodeIcon::Function).await,
-            ObjectKind::Procedure => routines(client, &database, *schema_oid, b"p", NodeIcon::Procedure).await,
+            ObjectKind::Table => relations(client, &database, *schema_oid, b"rp", NodeIcon::Table, true, None).await,
+            ObjectKind::View => relations(client, &database, *schema_oid, b"v", NodeIcon::View, true, Some(ObjectType::View)).await,
+            ObjectKind::MaterializedView => {
+                relations(client, &database, *schema_oid, b"m", NodeIcon::MaterializedView, true, Some(ObjectType::MaterializedView)).await
+            }
+            ObjectKind::Sequence => relations(client, &database, *schema_oid, b"S", NodeIcon::Sequence, false, Some(ObjectType::Sequence)).await,
+            ObjectKind::Function => routines(client, &database, *schema_oid, b"faw", NodeIcon::Function, ObjectType::Function).await,
+            ObjectKind::Procedure => routines(client, &database, *schema_oid, b"p", NodeIcon::Procedure, ObjectType::Procedure).await,
             ObjectKind::Type => {
                 let rows = client.query(TYPES, &[schema_oid]).await?;
                 Ok(rows
@@ -397,6 +420,7 @@ CREATE TABLE order_items_2026_12 PARTITION OF order_items FOR VALUES FROM ('2026
 CREATE VIEW customer_names AS SELECT full_name FROM customers;
 CREATE MATERIALIZED VIEW customer_count AS SELECT count(*) FROM customers;
 CREATE FUNCTION add_one(value integer) RETURNS integer LANGUAGE sql AS 'SELECT value + 1';
+CREATE AGGREGATE total_of(integer) (SFUNC = int4pl, STYPE = integer);
 CREATE PROCEDURE touch() LANGUAGE sql AS 'SELECT 1';
 CREATE SEQUENCE invoice_numbers;
 CREATE TYPE order_status AS ENUM ('paid', 'shipped');
@@ -452,7 +476,7 @@ CREATE DOMAIN positive_amount AS numeric CHECK (VALUE > 0);
                 ("Tables", "2"),
                 ("Views", "1"),
                 ("Materialized views", "1"),
-                ("Functions", "1"),
+                ("Functions", "2"),
                 ("Procedures", "1"),
                 ("Sequences", "1"),
                 ("Types", "2"),
@@ -464,7 +488,7 @@ CREATE DOMAIN positive_amount AS numeric CHECK (VALUE > 0);
         assert_eq!(tables[1].icon, NodeIcon::PartitionedTable);
 
         let functions = children(&client, folders[3].children.as_ref().unwrap(), false).await.unwrap();
-        assert_eq!(labels(&functions), vec!["add_one(value integer)"]);
+        assert_eq!(labels(&functions), vec!["add_one(value integer)", "total_of(integer)"]);
 
         let types = children(&client, folders[6].children.as_ref().unwrap(), false).await.unwrap();
         let details: Vec<&str> = types.iter().map(|node| node.detail.as_deref().unwrap()).collect();
@@ -516,6 +540,32 @@ CREATE DOMAIN positive_amount AS numeric CHECK (VALUE > 0);
         let installed = children(&client, extensions.children.as_ref().unwrap(), false).await.unwrap();
         assert!(labels(&installed).contains(&"plpgsql"), "{installed:?}");
         assert_eq!(extensions.children.as_ref().unwrap().database(), database);
+    }
+
+    #[tokio::test]
+    #[ignore = "needs TIDEWATER_TEST_DATABASE_URL pointing at a running Postgres"]
+    async fn live_marks_the_objects_an_editor_covers_and_leaves_tables_types_aggregates_and_columns_unmarked() {
+        let (client, database) = fixture_client().await;
+        let schemas = children(&client, &CatalogPath::Database { database: database.clone() }, false).await.unwrap();
+        let schema = schemas.iter().find(|node| node.label == "tw_catalog_test").unwrap();
+        let folders = children(&client, schema.children.as_ref().unwrap(), false).await.unwrap();
+        let kinds = |nodes: &[CatalogNode]| nodes.iter().map(|node| node.object.as_ref().map(|object| object.object_type)).collect::<Vec<_>>();
+        let mut found = Vec::new();
+        for folder in &folders {
+            found.push(kinds(&children(&client, folder.children.as_ref().unwrap(), false).await.unwrap()));
+        }
+
+        assert_eq!(schema.object.as_ref().map(|object| (object.object_type, object.database.as_str())), Some((ObjectType::Schema, database.as_str())));
+        assert_eq!(found, vec![
+            vec![None, None],
+            vec![Some(ObjectType::View)],
+            vec![Some(ObjectType::MaterializedView)],
+            vec![Some(ObjectType::Function), None],
+            vec![Some(ObjectType::Procedure)],
+            vec![Some(ObjectType::Sequence)],
+            vec![None, None],
+        ]);
+        assert!(schemas.last().unwrap().object.is_none());
     }
 
     #[tokio::test]

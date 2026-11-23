@@ -109,7 +109,7 @@ pub fn describe(error: &tokio_postgres::Error) -> String {
     message
 }
 
-async fn open(params: &ConnectParams) -> Result<(Client, JoinHandle<()>), tokio_postgres::Error> {
+pub(crate) async fn open(params: &ConnectParams) -> Result<(Client, JoinHandle<()>), tokio_postgres::Error> {
     let (client, connection) = build_config(params).connect(tls::connector(params.tls)).await?;
     let driver = tauri::async_runtime::spawn(async move {
         let _ = connection.await;

@@ -9,6 +9,7 @@ import { ConnectionPicker } from '../query/connection-picker';
 import { saveTab } from '../query/tab-files';
 import { UnsavedTabDialog } from '../query/unsaved-tab-dialog';
 import { useQueryTabStore } from '../store/query-tabs';
+import { ObjectEditorDialog } from '../objects/object-editor';
 import { SettingsDialog } from '../shell/settings-dialog';
 import { ConnectionDialog } from './connection-dialog';
 import { Modal, closeDialogOf } from './modal';
@@ -167,5 +168,7 @@ export function DialogHost() {
       return <UnsavedTabDialog model={{ tab_id: open.tab_id, title: open.title, transaction: open.transaction }} />;
     case 'overwrite-file':
       return <ConfirmDialog model={overwriteModel(open.tab_id, open.title, open.then_close)} />;
+    case 'object-editor':
+      return <ObjectEditorDialog key={open.editor_id} editor_id={open.editor_id} />;
   }
 }

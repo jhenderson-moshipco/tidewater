@@ -3,6 +3,7 @@ import { clearMocks } from '@tauri-apps/api/mocks';
 import { afterEach } from 'vitest';
 import { useDialogStore } from '../store/dialogs';
 import { useExplorerStore } from '../store/explorer';
+import { useObjectEditorStore } from '../store/object-editors';
 import { useQueryTabStore } from '../store/query-tabs';
 import { useServerStore } from '../store/servers';
 import { useTreeStore } from '../store/tree';
@@ -22,4 +23,5 @@ afterEach(() => {
   useWorkspaceStore.setState(useWorkspaceStore.getInitialState(), true);
   useTreeStore.setState(useTreeStore.getInitialState(), true);
   useQueryTabStore.setState(useQueryTabStore.getInitialState(), true);
+  useObjectEditorStore.setState(useObjectEditorStore.getInitialState(), true);
 });

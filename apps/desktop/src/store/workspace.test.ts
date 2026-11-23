@@ -29,7 +29,7 @@ describe('the workspace store', () => {
 
     state().setSidebarWidth(333.2);
 
-    expect(JSON.parse(localStorage.getItem('tidewater-workspace') ?? '{}').state).toEqual({ sidebar_width: 333, results_height: 320 });
+    expect(JSON.parse(localStorage.getItem('tidewater-workspace') ?? '{}').state).toEqual({ sidebar_width: 333, results_height: 320, object_editor_host: 'dialog' });
   });
 
   it('keeps the results panel between 120 and 800 pixels, in whole pixels, and remembers it', () => {
@@ -37,6 +37,6 @@ describe('the workspace store', () => {
 
     state().setResultsHeight(410.2);
 
-    expect(JSON.parse(localStorage.getItem('tidewater-workspace') ?? '{}').state).toEqual({ sidebar_width: 272, results_height: 410 });
+    expect(JSON.parse(localStorage.getItem('tidewater-workspace') ?? '{}').state).toEqual({ sidebar_width: 272, results_height: 410, object_editor_host: 'dialog' });
   });
 });

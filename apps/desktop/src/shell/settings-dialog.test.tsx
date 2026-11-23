@@ -1,6 +1,7 @@
 import { screen, within } from '@testing-library/react';
 import { describe, expect, it } from 'vitest';
 import { useSettingsStore } from '../store/settings';
+import { useWorkspaceStore } from '../store/workspace';
 import { deferred, failWith, mockCommands } from '../testing/backend';
 import { renderWithUser } from '../testing/render';
 import { DialogHost } from '../servers/server-dialogs';
@@ -50,5 +51,18 @@ describe('the Settings dialog', () => {
     renderWithUser(<DialogHost />);
     await useSettingsStore.getState().open();
     expect(screen.getByRole('alert').textContent).toBe('unreadable');
+  });
+
+  it('opens object editors in a dialog unless Tab is picked, and remembers the pick', async () => {
+    mockCommands({ key_storage: () => 'file' });
+    const { user } = renderWithUser(<DialogHost />);
+    await useSettingsStore.getState().open();
+    const group = within(screen.getByRole('group', { name: 'Open object editors in' }));
+    expect((group.getByRole('radio', { name: 'Dialog' }) as HTMLInputElement).checked).toBe(true);
+
+    await user.click(group.getByRole('radio', { name: 'Tab' }));
+
+    expect(useWorkspaceStore.getState().object_editor_host).toBe('tab');
+    expect(JSON.parse(localStorage.getItem('tidewater-workspace') ?? '{}').state.object_editor_host).toBe('tab');
   });
 });

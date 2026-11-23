@@ -1,9 +1,11 @@
 import { describe, expect, it, vi } from 'vitest';
 import type { TreeRow } from './tree-rows';
 import { useDialogStore } from '../store/dialogs';
+import { useObjectEditorStore, type EditorRequest } from '../store/object-editors';
+import { useWorkspaceStore } from '../store/workspace';
 import { useServerStore } from '../store/servers';
 import { useTreeStore } from '../store/tree';
-import { catalogNode, commandsOf, group, mockCommands, server } from '../testing/backend';
+import { catalogNode, commandsOf, group, mockCommands, objectRef, server } from '../testing/backend';
 import { disconnectServer, retryRow, rowMenu, showContextMenu } from './tree-menu';
 
 const info = { server_id: 'orders-dev', database: 'orders', server_version: '17.2', encryption: null };
@@ -103,14 +105,54 @@ describe('rowMenu', () => {
     useTreeStore.setState({ refreshRow });
     const leaf = rowMenu(row({ type: 'node', server_id: 'orders-dev', node: catalogNode('col:id', 'id') }), []);
     const folder = rowMenu(row({ type: 'node', server_id: 'orders-dev', node: catalogNode('db:orders', 'orders', { level: 'database', database: 'orders' }) }), []);
-    expect([texts(leaf), texts(folder)]).toEqual([['Refresh (off)', 'Copy Name'], ['Refresh', 'Copy Name']]);
-
-
+    expect([texts(leaf), texts(folder)]).toEqual([
+      ['Refresh (off)', 'Copy Name'],
+      ['New Schema…', 'New Schema in Tab', '—', 'Refresh', 'Copy Name'],
+    ]);
     run(leaf, 'Copy Name');
     run(folder, 'Refresh');
 
     expect(writeText).toHaveBeenCalledWith('id');
     expect(refreshRow).toHaveBeenCalledTimes(1);
+  });
+
+  it('offers to edit or drop an object, also in the place Settings does not pick, and opens each', () => {
+    const open = vi.fn((_request: EditorRequest) => 'editor-a');
+    useObjectEditorStore.setState({ open });
+    const view = row({ type: 'node', server_id: 'orders-dev', node: catalogNode('db:orders/rel:1', 'open_orders', null, null, objectRef()) });
+    const in_dialog = rowMenu(view, []);
+    useWorkspaceStore.getState().setObjectEditorHost('tab');
+    const in_tab = rowMenu(view, []);
+
+    expect(texts(in_dialog)).toEqual(['Edit…', 'Edit in Tab', 'Drop…', '—', 'Refresh (off)', 'Copy Name']);
+    expect(texts(in_tab).slice(0, 2)).toEqual(['Edit…', 'Edit in Dialog']);
+    run(in_dialog, 'Edit…');
+    run(in_dialog, 'Edit in Tab');
+    run(in_tab, 'Edit in Dialog');
+    run(in_dialog, 'Drop…');
+    expect(open.mock.calls.map(([request]) => [request.mode, request.host])).toEqual([
+      ['edit', undefined],
+      ['edit', 'tab'],
+      ['edit', 'dialog'],
+      ['drop', undefined],
+    ]);
+  });
+
+  it("offers to create the kind of object a folder holds, in the folder's schema", () => {
+    const open = vi.fn((_request: EditorRequest) => 'editor-a');
+    useObjectEditorStore.setState({ open });
+    const schema = row({ type: 'node', server_id: 'orders-dev', node: catalogNode('db:orders/schema:2200', 'sales') }, null);
+    const path = { level: 'folder', database: 'orders', schema_oid: 2200, kind: 'materialized_view' } as const;
+    const matviews = { ...row({ type: 'node', server_id: 'orders-dev', node: catalogNode('mv', 'Materialized views', path) }), parent_id: 'schema' };
+    const entries = rowMenu(matviews, [{ ...schema, id: 'schema', label: 'sales' }]);
+
+    expect(texts(entries)).toEqual(['New Materialized View…', 'New Materialized View in Tab', '—', 'Refresh', 'Copy Name']);
+    run(entries, 'New Materialized View…');
+    run(entries, 'New Materialized View in Tab');
+    expect(open.mock.calls.map(([request]) => [request.mode, request.host, request.object_type, request.schema])).toEqual([
+      ['create', undefined, 'materialized_view', 'sales'],
+      ['create', 'tab', 'materialized_view', 'sales'],
+    ]);
   });
 
   it('offers to retry an error and nothing for a loading row', async () => {

@@ -38,7 +38,7 @@ function server(id: string, group_id: string | null = null): ServerSummary {
 }
 
 function catalogNode(key: string, label: string, expandable = true): CatalogNode {
-  return { key, label, detail: null, icon: 'database', children: expandable ? { level: 'database', database: label } : null };
+  return { key, label, detail: null, icon: 'database', children: expandable ? { level: 'database', database: label } : null, object: null };
 }
 
 function input(overrides: Partial<TreeInput> = {}): TreeInput {
@@ -107,7 +107,7 @@ describe('buildRows', () => {
 });
 
 describe('chevron slots', () => {
-  const column = (key: string): CatalogNode => ({ key, label: key, detail: null, icon: 'column', children: null });
+  const column = (key: string): CatalogNode => ({ key, label: key, detail: null, icon: 'column', children: null, object: null });
   const loadedUnder = (nodes: Array<CatalogNode>) =>
     buildRows(
       input({
