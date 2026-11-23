@@ -8,14 +8,18 @@ describe('the app entry', () => {
     await expect(import('./main')).rejects.toThrow('Missing #root element');
   });
 
-  it('renders the workspace into #root and loads the saved servers', async () => {
+  it('loads the saved servers, then the last tabs, then renders the workspace into #root', async () => {
     document.body.innerHTML = '<div id="root"></div>';
-    const calls = mockCommands({ store_status: () => unlocked, list_servers: () => ({ groups: [], servers: [] }) });
+    const calls = mockCommands({
+      store_status: () => unlocked,
+      list_servers: () => ({ groups: [], servers: [] }),
+      load_tab_drafts: () => ({ snapshot: { active_id: null, tabs: [] }, missing_files: [], set_aside: null }),
+    });
     vi.resetModules();
 
     await import('./main');
 
     expect(await screen.findByText('No servers yet.')).toBeTruthy();
-    expect(commandsOf(calls)).toEqual(['store_status', 'list_servers']);
+    expect(commandsOf(calls)).toEqual(['store_status', 'list_servers', 'load_tab_drafts']);
   });
 });

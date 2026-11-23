@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import type { RowBatch } from '../generated/query';
 import { commandsOf, deferred, failWith, mockCommands, queryError, rowsOutcome, runResult, statement } from '../testing/backend';
 import { useDialogStore } from './dialogs';
-import { useQueryTabStore } from './query-tabs';
+import { isUnsaved, useQueryTabStore } from './query-tabs';
 
 const tabs = () => useQueryTabStore.getState();
 const tab = (id: string) => tabs().tabs[id];
@@ -241,5 +241,49 @@ describe('the query tab store', () => {
     tabs().resultsClosed(id);
 
     expect(tab(id)?.transaction).toBe('open');
+  });
+
+  it('counts a tab as unsaved when its text differs from its file, or an Untitled tab has any text', () => {
+    const untitled = tabs().openTab(null);
+    const on_file = tabs().openTab(null, { title: 'a.sql', text: 'SELECT 1', file: { path: '/a.sql', saved_text: 'SELECT 1', stamp: { modified_ms: 1, size: 8 } } });
+
+    expect([isUnsaved(tab(untitled)!), isUnsaved(tab(on_file)!)]).toEqual([false, false]);
+    tabs().setText(untitled, ' ');
+    tabs().setText(on_file, 'SELECT 2');
+    expect([isUnsaved(tab(untitled)!), isUnsaved(tab(on_file)!)]).toEqual([true, true]);
+  });
+
+  it('asks to save before closing an unsaved tab, naming any transaction that rolls back with it', () => {
+    const id = tabs().openTab(connection);
+    tabs().setText(id, 'SELECT 1');
+
+    tabs().requestClose(id);
+    expect(useDialogStore.getState().open).toEqual({ kind: 'unsaved-tab', tab_id: id, title: 'Untitled-1', transaction: null });
+
+    useQueryTabStore.setState((state) => ({ tabs: { ...state.tabs, [id]: { ...state.tabs[id]!, transaction: 'failed' } } }));
+    tabs().requestClose(id);
+    expect(useDialogStore.getState().open).toMatchObject({ kind: 'unsaved-tab', transaction: 'failed' });
+  });
+
+  it('names an opened file tab after the file without using up an Untitled number, and renames a tab saved to a file', () => {
+    const file = { path: '/a.sql', saved_text: 'SELECT 1', stamp: { modified_ms: 1, size: 8 } };
+    const opened = tabs().openTab(null, { title: 'a.sql', text: 'SELECT 1', file });
+    const untitled = tabs().openTab(null);
+
+    tabs().setFile(untitled, { ...file, path: '/b.sql', saved_text: '' }, 'b.sql');
+
+    expect([tab(opened)?.title, tab(untitled)?.title, tab(untitled)?.file?.path]).toEqual(['a.sql', 'b.sql', '/b.sql']);
+    expect(tabs().next_number).toBe(2);
+  });
+
+  it('restores the tabs, the one in front, the next Untitled number and what to announce, starting with the first tab', () => {
+    const restored = [{ ...tab(tabs().openTab(null))!, id: 'x', title: 'Untitled-7' }, { ...tab(tabs().openTab(null))!, id: 'y', title: 'notes.sql' }];
+
+    tabs().restore(restored, 'y', 'Restored.');
+    expect([tabs().order, tabs().active_id, tabs().next_number, tabs().announcement, tabs().restored]).toEqual([['x', 'y'], 'y', 8, 'Restored.', true]);
+    tabs().restore(restored, null, '');
+    expect(tabs().active_id).toBe('x');
+    tabs().restore([], null, '');
+    expect([tabs().active_id, tabs().next_number]).toEqual([null, 1]);
   });
 });

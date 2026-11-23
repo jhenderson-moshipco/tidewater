@@ -15,6 +15,7 @@ export type ConnectionDraft = {
   tls: TlsMode;
   read_only: boolean;
   statement_timeout_s: number | '';
+  results_timeout_min: number | '';
 };
 
 export type OpenDialog =
@@ -25,7 +26,9 @@ export type OpenDialog =
   | { kind: 'start-fresh' }
   | { kind: 'pick-connection'; tab_id: string; then_run: 'statement' | 'all' | null }
   | { kind: 'close-tab'; tab_id: string; title: string; transaction: 'open' | 'failed' }
-  | { kind: 'settings' };
+  | { kind: 'settings' }
+  | { kind: 'unsaved-tab'; tab_id: string; title: string; transaction: 'open' | 'failed' | null }
+  | { kind: 'overwrite-file'; tab_id: string; title: string; then_close: boolean };
 
 type DialogState = {
   open: OpenDialog | null;
@@ -59,6 +62,7 @@ export const empty_draft: ConnectionDraft = {
   tls: 'prefer',
   read_only: false,
   statement_timeout_s: '',
+  results_timeout_min: 5,
 };
 
 function draftFrom(server: ServerSummary): ConnectionDraft {
@@ -75,6 +79,7 @@ function draftFrom(server: ServerSummary): ConnectionDraft {
     tls: server.tls,
     read_only: server.session.read_only,
     statement_timeout_s: server.session.statement_timeout_ms === null ? '' : server.session.statement_timeout_ms / 1000,
+    results_timeout_min: server.session.results_timeout_ms / 60_000,
   };
 }
 

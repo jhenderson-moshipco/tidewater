@@ -1,5 +1,6 @@
 import mark_on_dark from '../../../../assets/icons/svg/mark-on-dark.svg';
 import mark_on_light from '../../../../assets/icons/svg/mark-on-light.svg';
+import { useQueryTabStore } from '../store/query-tabs';
 import { useServerStore } from '../store/servers';
 import { Workspace } from './workspace';
 import classes from './shell.module.css';
@@ -18,8 +19,9 @@ function StartupScreen() {
   );
 }
 
-/** The startup screen until the saved servers are loaded, then the workspace. */
+/** The startup screen until the saved servers and the last launch's tabs are back, then the workspace. */
 export function App() {
   const booted = useServerStore((state) => state.booted);
-  return booted ? <Workspace /> : <StartupScreen />;
+  const restored = useQueryTabStore((state) => state.restored);
+  return booted && restored ? <Workspace /> : <StartupScreen />;
 }

@@ -6,6 +6,8 @@ import { useServerStore } from '../store/servers';
 import { useTreeStore } from '../store/tree';
 import { fieldText } from '../utils/forms';
 import { ConnectionPicker } from '../query/connection-picker';
+import { saveTab } from '../query/tab-files';
+import { UnsavedTabDialog } from '../query/unsaved-tab-dialog';
 import { useQueryTabStore } from '../store/query-tabs';
 import { SettingsDialog } from '../shell/settings-dialog';
 import { ConnectionDialog } from './connection-dialog';
@@ -124,6 +126,15 @@ function closeTabModel(tab_id: string, title: string, transaction: 'open' | 'fai
   };
 }
 
+function overwriteModel(tab_id: string, title: string, then_close: boolean) {
+  return {
+    title: `${title} changed on disk`,
+    message: 'Another program changed or removed this file since Tidewater last read or saved it. Saving replaces it with the text in this tab.',
+    confirm_label: 'Overwrite',
+    action: () => saveTab(tab_id, { overwrite: true, then_close }),
+  };
+}
+
 const start_fresh_model = {
   title: 'Start with no saved servers?',
   message: 'The locked file is kept next to the new one, renamed with the date, in case its key turns up.',
@@ -152,5 +163,9 @@ export function DialogHost() {
       return <ConfirmDialog model={closeTabModel(open.tab_id, open.title, open.transaction)} />;
     case 'settings':
       return <SettingsDialog />;
+    case 'unsaved-tab':
+      return <UnsavedTabDialog model={{ tab_id: open.tab_id, title: open.title, transaction: open.transaction }} />;
+    case 'overwrite-file':
+      return <ConfirmDialog model={overwriteModel(open.tab_id, open.title, open.then_close)} />;
   }
 }

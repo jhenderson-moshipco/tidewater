@@ -23,6 +23,7 @@
     "@lezer/highlight": "^1.2.5",
     "@tabler/icons-react": "^3.52.0",
     "@tauri-apps/api": "^2.12.5",
+    "@tauri-apps/plugin-dialog": "~2.7.3",
     "react": "^19.3.1",
     "react-dom": "^19.3.1",
     "zustand": "^5.1.0"

@@ -1,6 +1,7 @@
 import { create } from 'zustand';
 import * as api from '../api/query';
 import { messageOf } from '../api/errors';
+import type { DraftFile } from '../generated/drafts';
 import type { RunResult, StatementResult, TransactionStatus } from '../generated/query';
 import { runAnnouncement } from '../query/describe';
 import type { TabConnection } from '../query/default-connection';
@@ -24,9 +25,19 @@ export type QueryTab = {
   run_offset: number;
   panel: ResultPanel;
   transaction: TransactionStatus | null;
-  /** Why the last run or fetch failed before any statement ran. */
+  /** Why the last run, fetch or save failed. */
   error: string | null;
+  /** The .sql file the tab was opened from or saved to. */
+  file: DraftFile | null;
 };
+
+/** What a new tab starts with besides its connection. */
+export type TabContent = { title?: string; text?: string; file?: DraftFile | null; selection?: { from: number; to: number } };
+
+/** Whether the tab holds text its file, or for an Untitled tab no file, doesn't have. */
+export function isUnsaved(tab: QueryTab): boolean {
+  return tab.file ? tab.text !== tab.file.saved_text : tab.text !== '';
+}
 
 type QueryTabState = {
   tabs: Readonly<Record<string, QueryTab>>;
@@ -35,7 +46,14 @@ type QueryTabState = {
   next_number: number;
   /** The latest sentence for the query area's status region. */
   announcement: string;
-  openTab: (connection: TabConnection | null) => string;
+  /** Whether the tabs from the last launch are back, so the workspace can replace the startup screen. */
+  restored: boolean;
+  openTab: (connection: TabConnection | null, content?: TabContent) => string;
+  /** Replaces every tab with tabs restored from the last launch. */
+  restore: (tabs: ReadonlyArray<QueryTab>, active_id: string | null, announcement: string) => void;
+  /** Records the file the tab now matches, renaming the tab after it. */
+  setFile: (id: string, file: DraftFile, title: string) => void;
+  announce: (announcement: string, tab?: { id: string; error: string }) => void;
   selectTab: (id: string) => void;
   setText: (id: string, text: string) => void;
   setSelection: (id: string, from: number, to: number) => void;
@@ -44,7 +62,7 @@ type QueryTabState = {
   run: (id: string, mode: RunMode) => Promise<void>;
   fetchMore: (id: string) => Promise<void>;
   cancel: (id: string) => Promise<void>;
-  /** Closes the tab, first asking when that would roll back a transaction the user began. */
+  /** Closes the tab, first asking when that would lose unsaved text or roll back a transaction the user began. */
   requestClose: (id: string) => void;
   closeTab: (id: string) => void;
   /** The Rust core closed the tab's idle results on its own. */
@@ -79,16 +97,17 @@ export const useQueryTabStore = create<QueryTabState>()((set, get) => {
     active_id: null,
     next_number: 1,
     announcement: '',
+    restored: false,
 
-    openTab: (connection) => {
+    openTab: (connection, content = {}) => {
       const { next_number } = get();
       const id = `query-${crypto.randomUUID()}`;
       const tab: QueryTab = {
         id,
-        title: `Untitled-${next_number}`,
+        title: content.title ?? `Untitled-${next_number}`,
         connection,
-        text: '',
-        selection: { from: 0, to: 0 },
+        text: content.text ?? '',
+        selection: content.selection ?? { from: 0, to: 0 },
         status: 'idle',
         started_at: null,
         result: null,
@@ -96,9 +115,35 @@ export const useQueryTabStore = create<QueryTabState>()((set, get) => {
         panel: 0,
         transaction: null,
         error: null,
+        file: content.file ?? null,
       };
-      set((state) => ({ tabs: { ...state.tabs, [id]: tab }, order: [...state.order, id], active_id: id, next_number: next_number + 1 }));
+      const numbered = content.title === undefined;
+      set((state) => ({
+        tabs: { ...state.tabs, [id]: tab },
+        order: [...state.order, id],
+        active_id: id,
+        next_number: numbered ? next_number + 1 : next_number,
+      }));
       return id;
+    },
+
+    restore: (tabs, active_id, announcement) => {
+      const numbers = tabs.map((tab) => Number(/^Untitled-(\d+)$/.exec(tab.title)?.[1] ?? 0));
+      set({
+        tabs: Object.fromEntries(tabs.map((tab) => [tab.id, tab])),
+        order: tabs.map((tab) => tab.id),
+        active_id: tabs.some((tab) => tab.id === active_id) ? active_id : (tabs[0]?.id ?? null),
+        next_number: Math.max(0, ...numbers) + 1,
+        announcement,
+        restored: true,
+      });
+    },
+
+    setFile: (id, file, title) => update(id, { file, title, error: null }),
+
+    announce: (announcement, tab) => {
+      if (tab) update(tab.id, { error: tab.error });
+      set({ announcement });
     },
 
     selectTab: (id) => set({ active_id: id }),
@@ -170,6 +215,11 @@ export const useQueryTabStore = create<QueryTabState>()((set, get) => {
 
     requestClose: (id) => {
       const tab = get().tabs[id];
+      const transaction = tab?.transaction === 'open' || tab?.transaction === 'failed' ? tab.transaction : null;
+      if (tab && isUnsaved(tab)) {
+        useDialogStore.getState().show({ kind: 'unsaved-tab', tab_id: id, title: tab.title, transaction });
+        return;
+      }
       if (tab?.transaction === 'open' || tab?.transaction === 'failed') {
         useDialogStore.getState().show({ kind: 'close-tab', tab_id: id, title: tab.title, transaction: tab.transaction });
         return;

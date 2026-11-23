@@ -66,6 +66,7 @@ export function readDraft(form: HTMLFormElement): ConnectionDraft {
     tls: pick(text('tls'), tls_modes, 'prefer'),
     read_only: data.get('read_only') === 'on',
     statement_timeout_s: wholeNumber(text('statement_timeout_s')),
+    results_timeout_min: wholeNumber(text('results_timeout_min')),
   };
 }
 
@@ -117,7 +118,7 @@ export function readConnectionForm(form: HTMLFormElement, editing: ServerSummary
     session: {
       read_only: draft.read_only,
       statement_timeout_ms: draft.statement_timeout_s === '' ? null : Math.round(draft.statement_timeout_s * 1000),
-      results_timeout_ms: editing?.session.results_timeout_ms ?? default_results_timeout_ms,
+      results_timeout_ms: draft.results_timeout_min === '' ? default_results_timeout_ms : Math.round(draft.results_timeout_min * 60_000),
     },
   };
 }

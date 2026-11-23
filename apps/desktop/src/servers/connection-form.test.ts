@@ -17,6 +17,7 @@ const all_fields = `
   <input name="user" value="postgres"><input name="password" type="password">
   <select name="tls"><option value="prefer" selected>Prefer</option><option value="require">Require</option></select>
   <input name="clear_password" type="checkbox"><input name="read_only" type="checkbox"><input name="statement_timeout_s">
+  <input name="results_timeout_min" value="5">
 `;
 
 function field(form: HTMLFormElement, name: string): HTMLInputElement | HTMLSelectElement {
@@ -46,6 +47,7 @@ describe('readDraft', () => {
       tls: 'prefer',
       read_only: false,
       statement_timeout_s: '',
+      results_timeout_min: '',
     });
   });
 });
@@ -107,10 +109,13 @@ describe('readConnectionForm', () => {
     });
   });
 
-  it("keeps an edited server's results timeout, which has no field in the form", () => {
+  it('sends the idle results timeout in milliseconds, and five minutes when the field is empty, as Test connection can send it', () => {
     const form = formWith(all_fields);
-    const editing = server({ session: { read_only: false, statement_timeout_ms: null, results_timeout_ms: 60_000 } });
-    expect(readConnectionForm(form, editing).session.results_timeout_ms).toBe(60_000);
+    field(form, 'results_timeout_min').value = '12';
+    expect(readConnectionForm(form, null).session.results_timeout_ms).toBe(720_000);
+
+    field(form, 'results_timeout_min').value = '';
+    expect(readConnectionForm(form, server()).session.results_timeout_ms).toBe(300_000);
   });
 
   it('sends port 0 for an empty port, so the Rust core rejects it', () => {

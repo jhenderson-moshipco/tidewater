@@ -4,6 +4,7 @@ mod catalog;
 mod commands;
 mod connections;
 mod error;
+mod files;
 mod menu;
 mod query;
 mod servers;
@@ -17,7 +18,7 @@ pub const RESULTS_CLOSED_EVENT: &str = "query-results-closed";
 
 /// Adds Tidewater's state, menu and commands to a Tauri builder.
 pub fn app<R: Runtime>(builder: Builder<R>) -> Builder<R> {
-    with_commands(builder).menu(menu::build).on_menu_event(menu::forward)
+    with_commands(builder).plugin(tauri_plugin_dialog::init()).menu(menu::build).on_menu_event(menu::forward)
 }
 
 /// Registers the saved-server store and connection manager. Neither touches the disk or keychain until first use.
@@ -27,11 +28,14 @@ fn manage_state<R: Runtime>(app: &mut App<R>) -> Result<(), Box<dyn std::error::
     app.manage(query::QuerySessions::new(move |tab_id| {
         let _ = handle.emit(RESULTS_CLOSED_EVENT, tab_id);
     }));
-    app.path()
+    let paths = app.path();
+    paths
         .app_config_dir()
-        .map(|folder| {
-            let vault = servers::vault::AppVault::new(&folder, Box::new(servers::vault::OsKeychain));
-            app.manage(commands::Store::new(folder.join("servers.json"), vault));
+        .and_then(|config| paths.app_data_dir().map(|data| (config, data)))
+        .map(|(config, data)| {
+            let vault = servers::vault::AppVault::new(&config, Box::new(servers::vault::OsKeychain));
+            app.manage(commands::Store::new(config.join("servers.json"), vault));
+            app.manage(files::drafts::DraftStore::new(data.join("tabs.json")));
         })
         .map_err(Into::into)
 }
@@ -63,5 +67,9 @@ fn with_commands<R: Runtime>(builder: Builder<R>) -> Builder<R> {
             commands::close_query_tab,
             commands::key_storage,
             commands::set_key_storage,
+            commands::read_sql_file,
+            commands::write_sql_file,
+            commands::load_tab_drafts,
+            commands::save_tab_drafts,
         ])
 }
