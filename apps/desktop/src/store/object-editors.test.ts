@@ -283,7 +283,7 @@ describe('reviewing and applying', () => {
 
     await store().apply(id);
 
-    expect(calls.at(-1)?.args).toEqual({ server_id: 'orders-dev', database: 'orders', statements: changePlan().statements });
+    expect(calls.at(-1)?.args).toEqual({ server_id: 'orders-dev', database: 'orders', statements: changePlan().statements, after_commit: [] });
     expect([store().editors[id], useDialogStore.getState().open, store().announcement]).toEqual([
       undefined,
       null,
@@ -336,6 +336,29 @@ describe('reviewing and applying', () => {
     expect(editor(id)).toMatchObject({ applying: false, failure });
     store().patch(id, { name: 'fixed' });
     expect(editor(id).failure).toBeNull();
+  });
+
+  it('starts again from the object as it now is when a statement after the commit fails, keeping the failure', async () => {
+    const failure = { statement_index: 1, committed: true, message: 'could not create index', detail: null, hint: null };
+    let reads = 0;
+    mockCommands({
+      list_schemas: () => ['public'],
+      object_definition: () => (++reads === 1 ? viewDefinition() : reads === 2 ? viewDefinition({ query: 'SELECT id, total FROM orders' }) : failWith('connection', 'connection refused')),
+      plan_object_change: () => changePlan(),
+      apply_object_change: () => ({ outcome: 'failed', failure }),
+    });
+    const refreshDatabase = vi.fn(async () => undefined);
+    useTreeStore.setState({ refreshDatabase });
+    const id = await changedView();
+
+    await store().apply(id);
+
+    expect(editor(id)).toMatchObject({ failure, plan: null, applying: false, draft: viewDefinition({ query: 'SELECT id, total FROM orders' }) });
+    expect([isDirty(editor(id)), refreshDatabase.mock.calls.length]).toEqual([false, 1]);
+    store().patch(id, { name: 'again' });
+    await planned();
+    await store().apply(id);
+    expect(editor(id).apply_error).toBe('connection refused');
   });
 
   it('shows why the change could not be sent at all, such as a lost connection', async () => {

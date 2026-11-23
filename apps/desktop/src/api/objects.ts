@@ -14,5 +14,6 @@ export const planObjectChange = (
   options: ChangeOptions,
 ) => invoke<ChangePlan>('plan_object_change', { server_id, database, object, original, changed, options });
 
-export const applyObjectChange = (server_id: string, database: string, statements: ReadonlyArray<string>) =>
-  invoke<ApplyOutcome>('apply_object_change', { server_id, database, statements });
+/** Runs `statements` in one transaction, then each of `after_commit` on its own once it commits. */
+export const applyObjectChange = (server_id: string, database: string, statements: ReadonlyArray<string>, after_commit: ReadonlyArray<string>) =>
+  invoke<ApplyOutcome>('apply_object_change', { server_id, database, statements, after_commit });

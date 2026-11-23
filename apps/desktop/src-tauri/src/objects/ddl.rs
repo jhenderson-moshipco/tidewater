@@ -1,6 +1,7 @@
 //! Writes the DDL for creating, changing and dropping schema objects. Nothing here touches a database.
 
 use super::model::{ChangeOptions, ChangeWarning, ObjectDefinition, Parallel, Volatility};
+use super::table;
 #[cfg(test)]
 use super::model::ObjectType;
 use crate::error::CommandError;
@@ -55,13 +56,19 @@ pub struct Planned {
     pub warnings: Vec<ChangeWarning>,
     /// Whether the plan drops the original object, so its dependents should be listed.
     pub drops_original: bool,
+    /// Statements that can't run in a transaction, run one by one after it commits.
+    pub after_commit: Vec<String>,
+    /// The numbers of the table columns the plan drops, whose dependents should be listed.
+    pub dropped_columns: Vec<i16>,
+    /// The names of the table constraints the plan drops, whose dependents should be listed.
+    pub dropped_constraints: Vec<String>,
 }
 
-fn warning(title: &str, detail: impl Into<String>) -> ChangeWarning {
+pub(super) fn warning(title: &str, detail: impl Into<String>) -> ChangeWarning {
     ChangeWarning { title: title.to_string(), detail: detail.into() }
 }
 
-fn required(value: &str, field: &str) -> Result<(), CommandError> {
+pub(super) fn required(value: &str, field: &str) -> Result<(), CommandError> {
     if value.trim().is_empty() {
         return Err(CommandError::Invalid(format!("{field} is required.")));
     }
@@ -76,7 +83,7 @@ fn whole_number(value: &str, field: &str) -> Result<(), CommandError> {
     Ok(())
 }
 
-fn comment_on(target: &str, comment: &Option<String>) -> String {
+pub(super) fn comment_on(target: &str, comment: &Option<String>) -> String {
     let value = comment.as_deref().filter(|text| !text.is_empty()).map_or("NULL".to_string(), literal);
     format!("COMMENT ON {target} IS {value}")
 }
@@ -90,6 +97,7 @@ fn keyword(definition: &ObjectDefinition) -> &'static str {
         ObjectDefinition::MaterializedView { .. } => "MATERIALIZED VIEW",
         ObjectDefinition::Routine { procedure: false, .. } => "FUNCTION",
         ObjectDefinition::Routine { procedure: true, .. } => "PROCEDURE",
+        ObjectDefinition::Table(_) => "TABLE",
     }
 }
 
@@ -103,6 +111,7 @@ fn target(definition: &ObjectDefinition) -> String {
         | ObjectDefinition::MaterializedView { schema, name, .. } => qualified(schema, name),
         ObjectDefinition::Routine { schema, name, identity_arguments, .. } if identity_arguments.is_empty() => qualified(schema, name),
         ObjectDefinition::Routine { schema, name, identity_arguments, .. } => format!("{}({identity_arguments})", qualified(schema, name)),
+        ObjectDefinition::Table(table) => qualified(&table.schema, &table.name),
     }
 }
 
@@ -113,6 +122,7 @@ fn comment(definition: &ObjectDefinition) -> &Option<String> {
         | ObjectDefinition::View { comment, .. }
         | ObjectDefinition::MaterializedView { comment, .. }
         | ObjectDefinition::Routine { comment, .. } => comment,
+        ObjectDefinition::Table(table) => &table.comment,
     }
 }
 
@@ -147,6 +157,7 @@ fn validate(definition: &ObjectDefinition) -> Result<(), CommandError> {
             required(language, "Language")?;
             required(body, "Body")
         }
+        ObjectDefinition::Table(table) => table::validate(table),
     }
 }
 
@@ -211,6 +222,7 @@ fn create_statement(definition: &ObjectDefinition, options: ChangeOptions, or_re
             lines.push(format!("AS {}", dollar_quoted(body)));
             lines.join("\n")
         }
+        ObjectDefinition::Table(table) => table::create_statement(table),
     }
 }
 
@@ -218,6 +230,9 @@ fn create(definition: &ObjectDefinition, options: ChangeOptions) -> Planned {
     let mut statements = vec![create_statement(definition, options, false)];
     if comment(definition).as_deref().is_some_and(|text| !text.is_empty()) {
         statements.push(comment_on(&format!("{} {}", keyword(definition), target(definition)), comment(definition)));
+    }
+    if let ObjectDefinition::Table(table) = definition {
+        statements.extend(table::after_create(table));
     }
     Planned { statements, ..Planned::default() }
 }
@@ -228,7 +243,7 @@ fn drop(definition: &ObjectDefinition, options: ChangeOptions) -> Planned {
     if options.cascade {
         warnings.push(warning("Drops its dependents too", "CASCADE also drops every object listed as depending on it."));
     }
-    Planned { statements: vec![format!("DROP {} {}{cascade}", keyword(definition), target(definition))], warnings, drops_original: true }
+    Planned { statements: vec![format!("DROP {} {}{cascade}", keyword(definition), target(definition))], warnings, drops_original: true, ..Planned::default() }
 }
 
 /// Where a definition sits: its schema (empty for a schema) and its name.
@@ -239,6 +254,7 @@ fn location(definition: &ObjectDefinition) -> (&str, &str) {
         | ObjectDefinition::View { schema, name, .. }
         | ObjectDefinition::MaterializedView { schema, name, .. }
         | ObjectDefinition::Routine { schema, name, .. } => (schema, name),
+        ObjectDefinition::Table(table) => (&table.schema, &table.name),
     }
 }
 
@@ -268,6 +284,10 @@ fn with_location(definition: &ObjectDefinition, schema: &str, name: &str) -> Obj
         | ObjectDefinition::Routine { schema: current_schema, name: current, .. } => {
             *current_schema = schema.to_string();
             *current = name.to_string();
+        }
+        ObjectDefinition::Table(table) => {
+            table.schema = schema.to_string();
+            table.name = name.to_string();
         }
     }
     located
@@ -299,7 +319,21 @@ fn renamed_identity(definition: &ObjectDefinition) -> ObjectDefinition {
     copy
 }
 
-fn alter(original: &ObjectDefinition, changed: &ObjectDefinition, options: ChangeOptions, view_replaceable: bool) -> Planned {
+/// The statements that give `original` the new name, schema and comment of `changed`, after its other changes.
+fn relocate_and_comment(original: &ObjectDefinition, changed: &ObjectDefinition, statements: &mut Vec<String>) {
+    statements.extend(relocate(original, changed));
+    if comment(original) != comment(changed) {
+        let renamed = with_location(original, location(changed).0, location(changed).1);
+        statements.push(comment_on(&format!("{} {}", keyword(changed), target(&renamed)), comment(changed)));
+    }
+}
+
+fn alter(original: &ObjectDefinition, changed: &ObjectDefinition, options: ChangeOptions, view_replaceable: bool) -> Result<Planned, CommandError> {
+    if let (ObjectDefinition::Table(before), ObjectDefinition::Table(after)) = (original, changed) {
+        let mut planned = table::alter(before, after, options)?;
+        relocate_and_comment(original, changed, &mut planned.statements);
+        return Ok(planned);
+    }
     let query_changed = query_of(original) != query_of(changed);
     let signature_changed = matches!(
         (original, changed),
@@ -310,17 +344,17 @@ fn alter(original: &ObjectDefinition, changed: &ObjectDefinition, options: Chang
     );
     match changed {
         ObjectDefinition::View { .. } if query_changed && !view_replaceable => {
-            return recreate(original, changed, options, "Drops and recreates the view", "Its columns change in a way CREATE OR REPLACE can't apply.");
+            return Ok(recreate(original, changed, options, "Drops and recreates the view", "Its columns change in a way CREATE OR REPLACE can't apply."));
         }
         ObjectDefinition::MaterializedView { .. } if query_changed => {
             let mut planned = recreate(original, changed, options, "Drops and recreates the materialized view", "Its query changed.");
             if options.with_data {
                 planned.warnings.push(warning("Runs the new query to fill it", "Reads of the materialized view wait until the query finishes."));
             }
-            return planned;
+            return Ok(planned);
         }
         ObjectDefinition::Routine { .. } if signature_changed => {
-            return recreate(original, changed, options, "Drops and recreates the routine", "Its arguments, return type or kind changed.");
+            return Ok(recreate(original, changed, options, "Drops and recreates the routine", "Its arguments, return type or kind changed."));
         }
         _ => {}
     }
@@ -347,12 +381,8 @@ fn alter(original: &ObjectDefinition, changed: &ObjectDefinition, options: Chang
         }
         _ => {}
     }
-    statements.extend(relocate(original, changed));
-    if comment(original) != comment(changed) {
-        let renamed = with_location(original, location(changed).0, location(changed).1);
-        statements.push(comment_on(&format!("{} {}", keyword(changed), target(&renamed)), comment(changed)));
-    }
-    Planned { statements, ..Planned::default() }
+    relocate_and_comment(original, changed, &mut statements);
+    Ok(Planned { statements, ..Planned::default() })
 }
 
 /// The DDL that turns `original` into `changed`: creates when there is no original, drops when there is no change.
@@ -362,7 +392,7 @@ pub fn plan(original: Option<&ObjectDefinition>, changed: Option<&ObjectDefiniti
         (None, Some(changed)) => validate(changed).map(|()| create(changed, options)),
         (Some(original), None) => Ok(drop(original, options)),
         (Some(original), Some(changed)) if original.object_type() == changed.object_type() => {
-            validate(changed).map(|()| alter(original, changed, options, view_replaceable))
+            validate(changed).and_then(|()| alter(original, changed, options, view_replaceable))
         }
         (Some(_), Some(_)) => Err(CommandError::Invalid("An object can't change into a different kind of object.".into())),
         (None, None) => Err(CommandError::Invalid("There is nothing to change.".into())),
@@ -647,4 +677,60 @@ mod tests {
             [ObjectType::Schema, ObjectType::Sequence, ObjectType::View, ObjectType::MaterializedView, ObjectType::Function, ObjectType::Procedure]
         );
     }
+
+    fn table_definition(schema: &str, name: &str) -> super::super::model::TableDefinition {
+        super::super::model::TableDefinition {
+            schema: schema.into(),
+            name: name.into(),
+            comment: None,
+            partition_key: None,
+            columns: Vec::new(),
+            constraints: Vec::new(),
+            indexes: Vec::new(),
+        }
+    }
+
+    fn table(schema: &str, name: &str, comment: Option<&str>) -> ObjectDefinition {
+        ObjectDefinition::Table(super::super::model::TableDefinition { comment: comment.map(str::to_string), ..table_definition(schema, name) })
+    }
+
+    #[test]
+    fn a_table_is_created_commented_moved_and_dropped_like_any_object() {
+        let created = plan(None, Some(&table("public", "notes", Some("scratch"))), options(), true).unwrap();
+        let moved = plan(Some(&table("public", "notes", None)), Some(&table("archive", "old_notes", Some("kept"))), options(), true).unwrap();
+        let dropped = plan(Some(&table("public", "notes", None)), None, options(), true).unwrap();
+        let invalid = plan(None, Some(&table("public", "", None)), options(), true).map_err(|error| error.to_string());
+
+        assert_eq!(created.statements, ["CREATE TABLE public.notes (\n  \n)", "COMMENT ON TABLE public.notes IS 'scratch'"]);
+        assert_eq!(moved.statements, [
+            "ALTER TABLE public.notes RENAME TO old_notes",
+            "ALTER TABLE public.old_notes SET SCHEMA archive",
+            "COMMENT ON TABLE archive.old_notes IS 'kept'",
+        ]);
+        assert_eq!((dropped.statements, dropped.drops_original), (vec!["DROP TABLE public.notes".to_string()], true));
+        assert_eq!(invalid.unwrap_err(), "Name is required.");
+        assert_eq!(table("a", "b", None).object_type(), ObjectType::Table);
+    }
+
+    #[test]
+    fn a_table_change_the_designer_refuses_is_refused_by_the_plan() {
+        let with_generated = |generated: &str| {
+            ObjectDefinition::Table(super::super::model::TableDefinition {
+                columns: vec![super::super::model::ColumnDefinition {
+                    number: Some(1),
+                    name: "c".into(),
+                    data_type: "int".into(),
+                    not_null: false,
+                    default: String::new(),
+                    identity: super::super::model::Identity::None,
+                    generated: generated.into(),
+                    using: String::new(),
+                    comment: None,
+                }],
+                ..table_definition("public", "t")
+            })
+        };
+        assert!(plan(Some(&with_generated("1")), Some(&with_generated("2")), options(), true).is_err());
+    }
+
 }

@@ -5,6 +5,7 @@ import { environmentLabel } from '../servers/connection-form';
 import form from '../servers/servers.module.css';
 import { canReview, confirmationName, editorTitle, useObjectEditorStore, type ObjectEditor } from '../store/object-editors';
 import { useServerStore } from '../store/servers';
+import { planStatements } from './describe';
 import { DefinitionFields } from './object-fields';
 import classes from './objects.module.css';
 
@@ -18,8 +19,8 @@ function statementCount(count: number): string {
 function planStatus(editor: ObjectEditor): string {
   if (editor.plan_error) return editor.plan_error;
   if (editor.planning) return 'Working out the SQL…';
-  if (!editor.plan || editor.plan.statements.length === 0) return 'No changes yet.';
-  return `${statementCount(editor.plan.statements.length)} to run.`;
+  const count = editor.plan ? planStatements(editor.plan).length : 0;
+  return count === 0 ? 'No changes yet.' : `${statementCount(count)} to run.`;
 }
 
 function Warnings({ plan }: { plan: ChangePlan }) {
@@ -67,8 +68,13 @@ function Dependents({ editor }: { editor: ObjectEditor }) {
   );
 }
 
+function sqlText(statements: ReadonlyArray<string>): string {
+  return statements.map((statement) => `${statement};`).join('\n\n');
+}
+
 function Preview({ editor }: { editor: ObjectEditor }) {
   const statements = editor.plan?.statements ?? [];
+  const after_commit = editor.plan?.after_commit ?? [];
   return (
     <section aria-labelledby={`${editor.id}-preview`} className={classes.preview} data-stale={editor.planning}>
       <h3 id={`${editor.id}-preview`} className={classes.sectionTitle}>
@@ -77,7 +83,13 @@ function Preview({ editor }: { editor: ObjectEditor }) {
       <p role="status" className={editor.plan_error ? classes.planError : classes.muted}>
         {planStatus(editor)}
       </p>
-      {statements.length > 0 && <pre className={classes.sql}>{statements.map((statement) => `${statement};`).join('\n\n')}</pre>}
+      {statements.length > 0 && <pre className={classes.sql}>{sqlText(statements)}</pre>}
+      {after_commit.length > 0 && (
+        <>
+          <p className={classes.muted}>Then, each on its own once that commits:</p>
+          <pre className={classes.sql}>{sqlText(after_commit)}</pre>
+        </>
+      )}
       {editor.plan && <Warnings plan={editor.plan} />}
       <Dependents editor={editor} />
     </section>
@@ -94,14 +106,30 @@ function Failure({ editor }: { editor: ObjectEditor }) {
   }
   const failure = editor.failure;
   if (!failure) return null;
+  const number = failure.statement_index + 1;
   return (
     <div role="alert" className={form.error}>
       <p>
-        Statement {failure.statement_index + 1} failed, so nothing was changed: {failure.message}
+        {failure.committed
+          ? `The change committed, but statement ${number}, after the commit, failed, and those after it didn't run: ${failure.message}`
+          : `Statement ${number} failed, so nothing was changed: ${failure.message}`}
       </p>
       {failure.detail && <p>Detail: {failure.detail}</p>}
       {failure.hint && <p>Hint: {failure.hint}</p>}
     </div>
+  );
+}
+
+/** The numbered statements of a review, counting on from `first`, with the one that failed marked. */
+function statementList(statements: ReadonlyArray<string>, first: number, failed: number | undefined) {
+  return (
+    <ol start={first + 1} className={classes.statements}>
+      {statements.map((statement, index) => (
+        <li key={index} data-failed={failed === first + index}>
+          <pre className={classes.sql}>{statement};</pre>
+        </li>
+      ))}
+    </ol>
   );
 }
 
@@ -121,14 +149,12 @@ function Review({ editor }: { editor: ObjectEditor }) {
         {editor.planning ? 'Working out the SQL…' : plan && `${statementCount(plan.statements.length)}, run in one transaction. If one fails, none of them is kept.`}
       </p>
       {editor.plan_error && <p className={classes.planError}>{editor.plan_error}</p>}
-      {plan && (
-        <ol className={classes.statements}>
-          {plan.statements.map((statement, index) => (
-            <li key={index} data-failed={editor.failure?.statement_index === index}>
-              <pre className={classes.sql}>{statement};</pre>
-            </li>
-          ))}
-        </ol>
+      {plan && statementList(plan.statements, 0, editor.failure?.statement_index)}
+      {plan && plan.after_commit.length > 0 && (
+        <>
+          <p className={classes.muted}>Then, each on its own once the transaction commits:</p>
+          {statementList(plan.after_commit, plan.statements.length, editor.failure?.statement_index)}
+        </>
       )}
       {plan && <Warnings plan={plan} />}
       <Dependents editor={editor} />
@@ -262,7 +288,7 @@ export function ObjectEditorView({ model }: { model: { editor_id: string; title_
   const editor = useObjectEditorStore((state) => state.editors[model.editor_id]) as ObjectEditor;
 
   return (
-    <div className={classes.editor} data-host={editor.host}>
+    <div className={classes.editor} data-host={editor.host} data-type={editor.object_type}>
       <Header editor={editor} title_id={model.title_id} />
       {editor.confirming_close && <CloseConfirm editor={editor} />}
       <Body editor={editor} />

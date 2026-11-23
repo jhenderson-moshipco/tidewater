@@ -219,15 +219,16 @@ pub async fn plan_object_change(
     objects::plan(&client, object.as_ref(), original.as_ref(), changed.as_ref(), options).await
 }
 
-/// Runs a plan's statements in one transaction, rolling all of them back if one fails.
+/// Runs a plan's statements in one transaction, rolling all of them back if one fails, then each after-commit statement.
 #[tauri::command(rename_all = "snake_case")]
 pub async fn apply_object_change(
     store: State<'_, Store>,
     server_id: String,
     database: String,
     statements: Vec<String>,
+    after_commit: Vec<String>,
 ) -> Result<ApplyOutcome, CommandError> {
-    objects::apply(&params_for(&store, &server_id, &database)?, &statements).await
+    objects::apply(&params_for(&store, &server_id, &database)?, &statements, &after_commit).await
 }
 
 /// Where the key for the saved servers is kept: a file only this user can read, or the system keychain.
@@ -573,7 +574,7 @@ mod tests {
             ("list_schemas", json!({ "server_id": saved["id"], "database": "postgres" })),
             ("object_definition", json!({ "server_id": saved["id"], "object": object })),
             ("plan_object_change", json!({ "server_id": saved["id"], "database": "postgres", "object": null, "original": null, "changed": null, "options": options })),
-            ("apply_object_change", json!({ "server_id": saved["id"], "database": "postgres", "statements": ["SELECT 1"] })),
+            ("apply_object_change", json!({ "server_id": saved["id"], "database": "postgres", "statements": ["SELECT 1"], "after_commit": [] })),
         ];
         for (command, args) in calls {
             assert_eq!(app.invoke(command, args).map_err(kind), Err("connection".into()), "{command}");
@@ -582,7 +583,7 @@ mod tests {
             ("list_schemas", json!({ "server_id": "missing", "database": "postgres" })),
             ("object_definition", json!({ "server_id": "missing", "object": object })),
             ("plan_object_change", json!({ "server_id": "missing", "database": "postgres", "options": options })),
-            ("apply_object_change", json!({ "server_id": "missing", "database": "postgres", "statements": [] })),
+            ("apply_object_change", json!({ "server_id": "missing", "database": "postgres", "statements": [], "after_commit": [] })),
         ] {
             assert_eq!(app.invoke(command, args).map_err(kind), Err("not_found".into()), "{command}");
         }
@@ -594,6 +595,7 @@ mod tests {
             ("plan_object_change", json!({ "server_id": "a", "database": "b" }), "options"),
             ("apply_object_change", json!({ "server_id": "a" }), "database"),
             ("apply_object_change", json!({ "server_id": "a", "database": "b" }), "statements"),
+            ("apply_object_change", json!({ "server_id": "a", "database": "b", "statements": [] }), "after_commit"),
         ] {
             let refused = app.invoke(command, args).unwrap_err();
             assert!(refused.as_str().unwrap().contains(&format!("missing required key {missing}")), "{command}");
@@ -621,13 +623,13 @@ mod tests {
         let options = json!({ "cascade": true, "with_data": true });
 
         let planned = app.invoke("plan_object_change", json!({ "server_id": id, "database": live.database, "object": null, "original": null, "changed": changed, "options": options })).unwrap();
-        let applied = app.invoke("apply_object_change", json!({ "server_id": id, "database": live.database, "statements": planned["statements"] })).unwrap();
+        let applied = app.invoke("apply_object_change", json!({ "server_id": id, "database": live.database, "statements": planned["statements"], "after_commit": [] })).unwrap();
         let schemas = app.invoke("list_schemas", json!({ "server_id": id, "database": live.database })).unwrap();
         let oid = app.invoke("catalog_children", json!({ "server_id": id, "path": { "level": "database", "database": live.database }, "show_system": false })).unwrap()
             .as_array().unwrap().iter().find(|node| node["label"] == json!(schema)).unwrap()["object"].clone();
         let read = app.invoke("object_definition", json!({ "server_id": id, "object": oid })).unwrap();
         let dropped = app.invoke("plan_object_change", json!({ "server_id": id, "database": live.database, "object": oid, "original": read, "changed": null, "options": options })).unwrap();
-        app.invoke("apply_object_change", json!({ "server_id": id, "database": live.database, "statements": dropped["statements"] })).unwrap();
+        app.invoke("apply_object_change", json!({ "server_id": id, "database": live.database, "statements": dropped["statements"], "after_commit": [] })).unwrap();
 
         assert_eq!(applied, json!({ "outcome": "applied" }));
         assert!(schemas.as_array().unwrap().contains(&json!(schema)));

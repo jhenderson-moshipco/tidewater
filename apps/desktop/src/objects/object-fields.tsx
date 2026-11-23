@@ -2,6 +2,7 @@ import type { ObjectDefinition } from '../generated/objects';
 import form from '../servers/servers.module.css';
 import { useObjectEditorStore, type ObjectEditor } from '../store/object-editors';
 import { CodeField } from './code-field';
+import { TableFields } from './table-fields';
 
 type FieldModel = {
   editor_id: string;
@@ -197,6 +198,7 @@ function RoutineFields({ model }: { model: { editor: ObjectEditor; draft: Extrac
 /** The fields for the draft's kind of object; each change goes straight to the editor's draft. */
 export function DefinitionFields({ editor }: { editor: ObjectEditor }) {
   const draft = editor.draft as ObjectDefinition;
+  if (draft.type === 'table') return <TableFields editor={editor} />;
   return (
     <div className={form.grid}>
       {draft.type === 'schema' && <TextField model={{ editor_id: editor.id, field: 'name', label: 'Name', value: draft.name, span: 3 }} />}

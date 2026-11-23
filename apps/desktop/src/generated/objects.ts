@@ -2,9 +2,13 @@
 
 export type ApplyFailure = { 
 /**
- * The statement that failed, counted from 0.
+ * The statement that failed, counted from 0 across the transaction's statements and then those after it.
  */
-statement_index: number, message: string, detail: string | null, hint: string | null, };
+statement_index: number, 
+/**
+ * Whether the transaction had already committed, so only the statements after it from this one on didn't run.
+ */
+committed: boolean, message: string, detail: string | null, hint: string | null, };
 
 export type ApplyOutcome = { "outcome": "applied" } | { "outcome": "failed", failure: ApplyFailure, };
 
@@ -26,9 +30,87 @@ statements: Array<string>, warnings: Array<ChangeWarning>,
 /**
  * What depends on an object the plan drops, as Postgres describes each one.
  */
-dependents: Array<string>, };
+dependents: Array<string>, 
+/**
+ * Statements that can't run in a transaction, each run on its own once the transaction commits.
+ */
+after_commit: Array<string>, };
 
 export type ChangeWarning = { title: string, detail: string, };
+
+export type ColumnDefinition = { 
+/**
+ * The column's number in its table, which follows it through a rename; null for a new column.
+ */
+number: number | null, name: string, data_type: string, not_null: boolean, 
+/**
+ * The default expression; empty for none.
+ */
+default: string, identity: Identity, 
+/**
+ * The expression a stored generated column is computed from; empty for an ordinary column. Fixed once added.
+ */
+generated: string, 
+/**
+ * How existing values become the new type when the type changes; empty to let Postgres cast them.
+ */
+using: string, comment: string | null, };
+
+export type ConstraintDefinition = { 
+/**
+ * The constraint's name in the database; null for a new one.
+ */
+original_name: string | null, 
+/**
+ * Empty to let Postgres name a new constraint.
+ */
+name: string, kind: ConstraintKind, 
+/**
+ * The constrained columns of a primary key, unique constraint or foreign key.
+ */
+columns: Array<string>, 
+/**
+ * The table a foreign key references, as SQL names it.
+ */
+references: string, 
+/**
+ * The referenced columns; empty for the referenced table's primary key.
+ */
+referenced_columns: Array<string>, on_update: ReferentialAction, on_delete: ReferentialAction, 
+/**
+ * A check's expression, or the whole definition of an `Other` constraint.
+ */
+expression: string, 
+/**
+ * Whether existing rows go unchecked (NOT VALID). Clearing it on an existing constraint validates them.
+ */
+not_valid: boolean, };
+
+export type ConstraintKind = "primary_key" | "unique" | "foreign_key" | "check" | "other";
+
+export type Identity = "none" | "always" | "by_default";
+
+export type IndexDefinition = { 
+/**
+ * The index's name in the database; null for a new one.
+ */
+original_name: string | null, 
+/**
+ * Empty to let Postgres name a new index.
+ */
+name: string, unique: boolean, method: string, 
+/**
+ * The indexed columns and expressions, as written between the parentheses.
+ */
+keys: string, 
+/**
+ * What follows the keys, such as `INCLUDE (…)` or `WHERE …`; empty for nothing.
+ */
+clauses: string, 
+/**
+ * Build it with `CREATE INDEX CONCURRENTLY` once the rest of the change commits, so writes don't wait.
+ */
+concurrently: boolean, };
 
 /**
  * An object's editable definition. Numbers a sequence may hold beyond JavaScript's safe range travel as text.
@@ -49,15 +131,30 @@ identity_arguments: string,
 /**
  * Empty for a procedure.
  */
-returns: string, language: string, volatility: Volatility, security_definer: boolean, parallel: Parallel, body: string, comment: string | null, };
+returns: string, language: string, volatility: Volatility, security_definer: boolean, parallel: Parallel, body: string, comment: string | null, } | { "type": "table" } & TableDefinition;
 
 /**
  * An existing object, by its database and oid.
  */
 export type ObjectRef = { database: string, object_type: ObjectType, oid: number, };
 
-export type ObjectType = "schema" | "sequence" | "view" | "materialized_view" | "function" | "procedure";
+export type ObjectType = "schema" | "table" | "sequence" | "view" | "materialized_view" | "function" | "procedure";
 
 export type Parallel = "unsafe" | "restricted" | "safe";
+
+export type ReferentialAction = "no_action" | "restrict" | "cascade" | "set_null" | "set_default";
+
+/**
+ * A table with its columns, constraints and indexes.
+ */
+export type TableDefinition = { schema: string, name: string, comment: string | null, 
+/**
+ * How a partitioned table splits its rows, as Postgres prints it; null for a plain table. The designer can't change it.
+ */
+partition_key: string | null, columns: Array<ColumnDefinition>, constraints: Array<ConstraintDefinition>, 
+/**
+ * The table's indexes, leaving out those that back a primary key or unique constraint.
+ */
+indexes: Array<IndexDefinition>, };
 
 export type Volatility = "volatile" | "stable" | "immutable";
