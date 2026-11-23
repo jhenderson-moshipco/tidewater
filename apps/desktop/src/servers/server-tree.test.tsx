@@ -49,12 +49,12 @@ describe('the server tree', () => {
 
     expect(items().map((row) => row.textContent)).toEqual([
       'Orders platform1 server',
-      'billing, not connectedPROD',
+      'billingPRODNot connected',
       'Archive0 servers',
-      'orders-dev, connectedDEV',
+      'orders-devDEVConnected · PG 17.2',
       'orders3 schemas',
       'Loading…',
-      'broken, connectedDEV',
+      'brokenDEVConnected · PG 17.2',
       'connection closed',
     ]);
     const orders = item(/^orders3 schemas/);
@@ -231,5 +231,11 @@ describe('the server tree', () => {
     const error = item(/^x+$/);
 
     expect(error.style.height).toBe(`${5 * 18 + 6}px`);
+  });
+
+  it('shows a failed server as Failed after its badge', () => {
+    useServerStore.setState({ servers: [server()], connections: { 'orders-dev': { status: 'failed', message: 'refused' } } });
+    renderWithUser(<ServerTree />);
+    expect(item(/^orders-dev/).textContent).toBe('orders-devDEVFailed');
   });
 });
