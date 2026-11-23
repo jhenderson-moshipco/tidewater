@@ -2,7 +2,7 @@ import { create } from 'zustand';
 import * as api from '../api/objects';
 import { messageOf } from '../api/errors';
 import type { ApplyFailure, ChangeOptions, ChangePlan, ObjectDefinition, ObjectRef, ObjectType } from '../generated/objects';
-import { blankDefinition, capitalized, objectTypeOf, qualifiedName, type_labels } from '../objects/describe';
+import { blankDefinition, capitalized, objectTypeOf, planStatements, qualifiedName, type_labels } from '../objects/describe';
 import { restoreFocusIfLost } from '../shell/focus';
 import { useDialogStore } from './dialogs';
 import { useQueryTabStore } from './query-tabs';
@@ -90,7 +90,7 @@ export function confirmationName(editor: ObjectEditor): string | null {
 
 /** Whether the plan is current, has statements, and could run. */
 export function canReview(editor: ObjectEditor): boolean {
-  return !editor.planning && !editor.applying && (editor.plan?.statements.length ?? 0) > 0;
+  return !editor.planning && !editor.applying && editor.plan !== null && planStatements(editor.plan).length > 0;
 }
 
 function appliedMessage(editor: ObjectEditor): string {
@@ -146,6 +146,21 @@ export const useObjectEditorStore = create<ObjectEditorState>()((set, get) => {
     window.clearTimeout(plan_timers.get(id));
     update(id, { planning: true });
     plan_timers.set(id, window.setTimeout(() => void get().plan(id), plan_delay_ms));
+  };
+
+  /**
+   * After statements past the commit fail, the rest of the change is in the database: the tree shows it, and the editor
+   * starts again from the object as it now is, with the failure still showing.
+   */
+  const keepCommitted = async (id: string, editor: ObjectEditor, failure: ApplyFailure) => {
+    update(id, { applying: false, failure, plan: null });
+    void useTreeStore.getState().refreshDatabase(editor.server_id, editor.database);
+    try {
+      const current = await api.objectDefinition(editor.server_id, editor.object as ObjectRef);
+      update(id, { original: current, start: current, draft: current });
+    } catch (error) {
+      update(id, { apply_error: messageOf(error) });
+    }
   };
 
   /** An editor already showing this object in a tab, so a second Edit switches to it. */
@@ -276,7 +291,12 @@ export const useObjectEditorStore = create<ObjectEditorState>()((set, get) => {
       if (name !== null && editor.confirm_name !== name) return;
       update(id, { applying: true, failure: null, apply_error: null });
       try {
-        const outcome = await api.applyObjectChange(editor.server_id, editor.database, (editor.plan as ChangePlan).statements);
+        const plan = editor.plan as ChangePlan;
+        const outcome = await api.applyObjectChange(editor.server_id, editor.database, plan.statements, plan.after_commit);
+        if (outcome.outcome === 'failed' && outcome.failure.committed) {
+          await keepCommitted(id, editor, outcome.failure);
+          return;
+        }
         if (outcome.outcome === 'failed') {
           update(id, { applying: false, failure: outcome.failure });
           return;
@@ -292,7 +312,7 @@ export const useObjectEditorStore = create<ObjectEditorState>()((set, get) => {
     copyToTab: (id) => {
       const editor = get().editors[id];
       if (!editor || !canReview(editor)) return;
-      const statements = (editor.plan as ChangePlan).statements;
+      const statements = planStatements(editor.plan as ChangePlan);
       const text = `${statements.map((statement) => `${statement};`).join('\n\n')}\n`;
       const tabs = useQueryTabStore.getState();
       const tab_id = tabs.openTab({ server_id: editor.server_id, database: editor.database }, { text });

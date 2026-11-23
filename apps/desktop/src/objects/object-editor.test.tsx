@@ -232,6 +232,28 @@ describe('reviewing a change', () => {
   });
 });
 
+describe('statements after the commit', () => {
+  it('lists the statements that run after the commit apart, numbered on, and says when one of them failed after the rest committed', async () => {
+    const plan = changePlan({ statements: ['ALTER TABLE public.t ADD COLUMN n integer'], after_commit: ['CREATE INDEX CONCURRENTLY ON public.t USING btree (n)'] });
+    const failure = { statement_index: 1, committed: true, message: 'could not create index', detail: null, hint: null };
+    backend({ plan_object_change: () => plan, apply_object_change: () => ({ outcome: 'failed', failure }) });
+    const { user } = await openEditor({ ...edit_view, server_id: 'orders-prod' });
+    await user.type(screen.getByRole('textbox', { name: 'Name' }), 's');
+
+    await waitFor(() => expect(within(preview()).getByText('2 statements to run.')).toBeTruthy());
+    expect(within(preview()).getByText('Then, each on its own once that commits:')).toBeTruthy();
+    await user.click(screen.getByRole('button', { name: 'Review and apply' }));
+    const lists = screen.getAllByRole('list');
+    expect([lists[1]?.getAttribute('start'), lists.length]).toEqual(['2', 2]);
+    await user.type(screen.getByRole('textbox', { name: 'This is a PROD server. Type orders-prod to apply.' }), 'orders-prod');
+    await user.click(screen.getByRole('button', { name: 'Apply' }));
+
+    expect((await screen.findByRole('alert')).textContent).toBe(
+      "The change committed, but statement 2, after the commit, failed, and those after it didn't run: could not create index",
+    );
+  });
+});
+
 describe('dropping an object', () => {
   it('lists the SQL and says nothing depends on it, and Cancel closes', async () => {
     backend({ plan_object_change: () => changePlan({ statements: ['DROP VIEW public.open_orders'] }) });

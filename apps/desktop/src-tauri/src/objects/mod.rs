@@ -2,6 +2,7 @@
 
 pub mod ddl;
 pub mod model;
+pub mod table;
 
 use serde::Serialize;
 use tokio_postgres::Client;
@@ -9,7 +10,10 @@ use ts_rs::TS;
 
 use crate::connections::{ConnectParams, describe, open};
 use crate::error::CommandError;
-use model::{ApplyFailure, ChangeOptions, ChangePlan, ObjectDefinition, ObjectRef, ObjectType, Parallel, Volatility};
+use model::{
+    ApplyFailure, ChangeOptions, ChangePlan, ColumnDefinition, ConstraintDefinition, ConstraintKind, Identity, IndexDefinition, ObjectDefinition, ObjectRef,
+    ObjectType, Parallel, ReferentialAction, TableDefinition, Volatility,
+};
 
 const SCHEMA_NAMES: &str = "\
 SELECT nspname FROM pg_namespace
@@ -32,15 +36,52 @@ SELECT p.prokind = 'p', n.nspname, p.proname, pg_get_function_arguments(p.oid), 
 FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace JOIN pg_language l ON l.oid = p.prolang
 WHERE p.oid = $1 AND p.prokind = ANY($2)";
 const VIEW_COLUMNS: &str = "SELECT attname, atttypid FROM pg_attribute WHERE attrelid = $1 AND attnum > 0 AND NOT attisdropped ORDER BY attnum";
-/// What depends on an object, naming a dependent view rather than the internal rule that holds its query.
+/// What depends on what a plan drops: the object itself when `$3`, the table columns numbered in `$4`, and the table
+/// constraints named in `$5`, such as another table's foreign key on a unique index. A dependent view is named, rather
+/// than the internal rule that holds its query, and a table's own indexes and constraints, which go with it, are left out.
 const DEPENDENTS: &str = "\
 SELECT DISTINCT coalesce(
   (SELECT CASE c.relkind WHEN 'm' THEN 'materialized view ' ELSE 'view ' END || c.oid::regclass::text
    FROM pg_rewrite r JOIN pg_class c ON c.oid = r.ev_class WHERE d.classid = 'pg_rewrite'::regclass AND r.oid = d.objid),
   pg_describe_object(d.classid, d.objid, d.objsubid))
 FROM pg_depend d
-WHERE d.refclassid = $1::text::regclass AND d.refobjid = $2 AND d.deptype IN ('n', 'a')
+WHERE ($3 AND d.refclassid = $1::text::regclass AND d.refobjid = $2 AND d.deptype IN ('n', 'a'))
+  OR (d.deptype = 'n' AND d.refclassid = 'pg_class'::regclass AND d.refobjid = $2 AND d.refobjsubid = ANY($4::smallint[]))
+  OR (d.deptype = 'n' AND d.refclassid = 'pg_constraint'::regclass
+      AND d.refobjid IN (SELECT oid FROM pg_constraint WHERE conrelid = $2 AND conname = ANY($5::text[])))
+  OR (d.deptype = 'n' AND d.refclassid = 'pg_class'::regclass
+      AND d.refobjid IN (SELECT conindid FROM pg_constraint WHERE conrelid = $2 AND conname = ANY($5::text[])))
 ORDER BY 1";
+/// A table with its columns, constraints and indexes, each list as a JSON array of rows. Not-null constraints are left
+/// out since columns carry them, and so are indexes a primary key, unique or exclusion constraint owns.
+const TABLE: &str = "\
+SELECT n.nspname, c.relname, obj_description(c.oid, 'pg_class'), CASE WHEN c.relkind = 'p' THEN pg_get_partkeydef(c.oid) END,
+  (SELECT coalesce(json_agg(json_build_array(
+      a.attnum, a.attname, format_type(a.atttypid, a.atttypmod), a.attnotnull,
+      CASE WHEN a.attgenerated = '' THEN coalesce(pg_get_expr(d.adbin, d.adrelid), '') ELSE '' END,
+      a.attidentity::text,
+      CASE WHEN a.attgenerated = '' THEN '' ELSE coalesce(pg_get_expr(d.adbin, d.adrelid), '') END,
+      col_description(a.attrelid, a.attnum)) ORDER BY a.attnum), '[]')::text
+   FROM pg_attribute a LEFT JOIN pg_attrdef d ON d.adrelid = a.attrelid AND d.adnum = a.attnum
+   WHERE a.attrelid = c.oid AND a.attnum > 0 AND NOT a.attisdropped),
+  (SELECT coalesce(json_agg(json_build_array(
+      k.conname, k.contype::text,
+      ARRAY(SELECT a.attname::text FROM unnest(k.conkey) WITH ORDINALITY u(n, i)
+            JOIN pg_attribute a ON a.attrelid = k.conrelid AND a.attnum = u.n ORDER BY u.i),
+      CASE WHEN k.contype = 'f' THEN k.confrelid::regclass::text ELSE '' END,
+      ARRAY(SELECT a.attname::text FROM unnest(k.confkey) WITH ORDINALITY u(n, i)
+            JOIN pg_attribute a ON a.attrelid = k.confrelid AND a.attnum = u.n ORDER BY u.i),
+      k.confupdtype::text, k.confdeltype::text,
+      CASE WHEN k.contype = 'c' THEN pg_get_expr(k.conbin, k.conrelid) ELSE '' END,
+      pg_get_constraintdef(k.oid), NOT k.convalidated)
+    ORDER BY CASE k.contype WHEN 'p' THEN 0 WHEN 'u' THEN 1 WHEN 'f' THEN 2 WHEN 'c' THEN 3 ELSE 4 END, k.conname), '[]')::text
+   FROM pg_constraint k WHERE k.conrelid = c.oid AND k.contype <> 'n' AND k.conislocal),
+  (SELECT coalesce(json_agg(json_build_array(ic.relname, i.indisunique, am.amname, pg_get_indexdef(i.indexrelid)) ORDER BY ic.relname), '[]')::text
+   FROM pg_index i JOIN pg_class ic ON ic.oid = i.indexrelid JOIN pg_am am ON am.oid = ic.relam
+   WHERE i.indrelid = c.oid AND NOT EXISTS (SELECT 1 FROM pg_constraint k
+     WHERE k.conindid = i.indexrelid AND k.conrelid = i.indrelid AND k.contype IN ('p', 'u', 'x')))
+FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+WHERE c.oid = $1 AND c.relkind IN ('r', 'p')";
 
 /// The user's schemas in this database, for choosing where an object goes.
 pub async fn schema_names(client: &Client) -> Result<Vec<String>, CommandError> {
@@ -64,6 +105,111 @@ fn parallel(code: &str) -> Parallel {
     }
 }
 
+fn identity(code: &str) -> Identity {
+    match code {
+        "a" => Identity::Always,
+        "d" => Identity::ByDefault,
+        _ => Identity::None,
+    }
+}
+
+fn referential(code: &str) -> ReferentialAction {
+    match code {
+        "r" => ReferentialAction::Restrict,
+        "c" => ReferentialAction::Cascade,
+        "n" => ReferentialAction::SetNull,
+        "d" => ReferentialAction::SetDefault,
+        _ => ReferentialAction::NoAction,
+    }
+}
+
+/// A constraint's kind, or `Other` for a kind the designer doesn't build or one with options its fields can't hold.
+fn constraint_kind(code: &str, definition: &str) -> ConstraintKind {
+    const UNBUILT: [&str; 5] = [" DEFERRABLE", " INCLUDE ", "NULLS NOT DISTINCT", " MATCH ", "NO INHERIT"];
+    if UNBUILT.iter().any(|option| definition.contains(option)) {
+        return ConstraintKind::Other;
+    }
+    match code {
+        "p" => ConstraintKind::PrimaryKey,
+        "u" => ConstraintKind::Unique,
+        "f" => ConstraintKind::ForeignKey,
+        "c" => ConstraintKind::Check,
+        _ => ConstraintKind::Other,
+    }
+}
+
+/// Splits an index definition from `pg_get_indexdef` into the keys between the parentheses after `USING method` and
+/// the clauses after them.
+fn index_parts(definition: &str, method: &str) -> (String, String) {
+    let marker = format!(" USING {method} (");
+    let Some(start) = definition.find(&marker).map(|found| found + marker.len()) else { return (String::new(), String::new()) };
+    let (mut depth, mut quoted) = (1, false);
+    for (offset, character) in definition[start..].char_indices() {
+        match character {
+            '\'' => quoted = !quoted,
+            '(' if !quoted => depth += 1,
+            ')' if !quoted => depth -= 1,
+            _ => {}
+        }
+        if depth == 0 {
+            let end = start + offset;
+            return (definition[start..end].to_string(), definition[end + 1..].trim().to_string());
+        }
+    }
+    (definition[start..].to_string(), String::new())
+}
+
+type ColumnRow = (i16, String, String, bool, String, String, String, Option<String>);
+type ConstraintRow = (String, String, Vec<String>, String, Vec<String>, String, String, String, String, bool);
+type IndexRow = (String, bool, String, String);
+
+/// Rows that `TABLE` builds as JSON, which always parse.
+fn json_rows<T: serde::de::DeserializeOwned>(text: &str) -> Vec<T> {
+    serde_json::from_str(text).expect("the catalog query builds this JSON")
+}
+
+fn column(row: ColumnRow) -> ColumnDefinition {
+    let (number, name, data_type, not_null, default, identity_code, generated, comment) = row;
+    ColumnDefinition { number: Some(number), name, data_type, not_null, default, identity: identity(&identity_code), generated, using: String::new(), comment }
+}
+
+fn constraint(row: ConstraintRow) -> ConstraintDefinition {
+    let (name, code, columns, references, referenced_columns, on_update, on_delete, check, definition, not_valid) = row;
+    let kind = constraint_kind(&code, &definition);
+    let expression = if kind == ConstraintKind::Other { definition } else { check };
+    ConstraintDefinition {
+        original_name: Some(name.clone()),
+        name,
+        kind,
+        columns,
+        references,
+        referenced_columns,
+        on_update: referential(&on_update),
+        on_delete: referential(&on_delete),
+        expression,
+        not_valid,
+    }
+}
+
+fn index(row: IndexRow) -> IndexDefinition {
+    let (name, unique, method, definition) = row;
+    let (keys, clauses) = index_parts(&definition, &method);
+    IndexDefinition { original_name: Some(name.clone()), name, unique, method, keys, clauses, concurrently: false }
+}
+
+async fn table_definition(client: &Client, oid: u32) -> Result<ObjectDefinition, CommandError> {
+    let row = client.query_opt(TABLE, &[&oid]).await?.ok_or_else(gone)?;
+    Ok(ObjectDefinition::Table(TableDefinition {
+        schema: row.get(0),
+        name: row.get(1),
+        comment: row.get(2),
+        partition_key: row.get(3),
+        columns: json_rows(row.get(4)).into_iter().map(column).collect(),
+        constraints: json_rows(row.get(5)).into_iter().map(constraint).collect(),
+        indexes: json_rows(row.get(6)).into_iter().map(index).collect(),
+    }))
+}
+
 fn char_codes(codes: &[u8]) -> Vec<i8> {
     codes.iter().map(|code| *code as i8).collect()
 }
@@ -76,6 +222,7 @@ fn gone() -> CommandError {
 pub async fn definition(client: &Client, object: &ObjectRef) -> Result<ObjectDefinition, CommandError> {
     let oid = object.oid;
     match object.object_type {
+        ObjectType::Table => table_definition(client, oid).await,
         ObjectType::Schema => {
             let row = client.query_opt(SCHEMA, &[&oid]).await?.ok_or_else(gone)?;
             Ok(ObjectDefinition::Schema { name: row.get(0), comment: row.get(1) })
@@ -145,7 +292,7 @@ async fn check_query(client: &Client, query: &str, view_oid: Option<u32>) -> Res
 fn catalog_of(object_type: ObjectType) -> &'static str {
     match object_type {
         ObjectType::Schema => "pg_namespace",
-        ObjectType::Sequence | ObjectType::View | ObjectType::MaterializedView => "pg_class",
+        ObjectType::Table | ObjectType::Sequence | ObjectType::View | ObjectType::MaterializedView => "pg_class",
         ObjectType::Function | ObjectType::Procedure => "pg_proc",
     }
 }
@@ -172,11 +319,13 @@ pub async fn plan(
     }
     let planned = ddl::plan(original, changed, options, view_replaceable)?;
     let mut dependents = Vec::new();
-    if let Some(object) = object.filter(|_| planned.drops_original) {
-        let rows = client.query(DEPENDENTS, &[&catalog_of(object.object_type), &object.oid]).await?;
-        dependents = rows.iter().map(|row| row.get(0)).collect();
+    let drops_something = planned.drops_original || !planned.dropped_columns.is_empty() || !planned.dropped_constraints.is_empty();
+    if let Some(object) = object.filter(|_| drops_something) {
+        let params: [&(dyn tokio_postgres::types::ToSql + Sync); 5] =
+            [&catalog_of(object.object_type), &object.oid, &planned.drops_original, &planned.dropped_columns, &planned.dropped_constraints];
+        dependents = client.query(DEPENDENTS, &params).await?.iter().map(|row| row.get(0)).collect();
     }
-    Ok(ChangePlan { statements: planned.statements, warnings: planned.warnings, dependents })
+    Ok(ChangePlan { statements: planned.statements, warnings: planned.warnings, dependents, after_commit: planned.after_commit })
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, TS)]
@@ -188,24 +337,38 @@ pub enum ApplyOutcome {
     Failed { failure: ApplyFailure },
 }
 
-/// Runs the statements in one transaction on a connection of their own, rolling all of them back if one fails.
-pub async fn apply(params: &ConnectParams, statements: &[String]) -> Result<ApplyOutcome, CommandError> {
+fn failure(error: &tokio_postgres::Error, statement_index: usize, committed: bool) -> ApplyOutcome {
+    let database_error = error.as_db_error();
+    ApplyOutcome::Failed {
+        failure: ApplyFailure {
+            statement_index: u32::try_from(statement_index).unwrap_or(u32::MAX),
+            committed,
+            message: database_error.map_or_else(|| describe(error), |database_error| database_error.message().to_string()),
+            detail: database_error.and_then(|database_error| database_error.detail()).map(str::to_string),
+            hint: database_error.and_then(|database_error| database_error.hint()).map(str::to_string),
+        },
+    }
+}
+
+/// Runs the statements in one transaction on a connection of their own, rolling all of them back if one fails. Once
+/// it commits, each of `after_commit` runs on its own, stopping at the first that fails.
+pub async fn apply(params: &ConnectParams, statements: &[String], after_commit: &[String]) -> Result<ApplyOutcome, CommandError> {
     let (client, driver) = open(params).await?;
     let steps = std::iter::once("BEGIN").chain(statements.iter().map(String::as_str)).chain(std::iter::once("COMMIT"));
     let mut outcome = ApplyOutcome::Applied;
     for (index, step) in steps.enumerate() {
         if let Err(error) = client.batch_execute(step).await {
             let _ = client.batch_execute("ROLLBACK").await;
-            let database_error = error.as_db_error();
-            outcome = ApplyOutcome::Failed {
-                failure: ApplyFailure {
-                    statement_index: u32::try_from(index.saturating_sub(1)).unwrap_or(u32::MAX),
-                    message: database_error.map_or_else(|| describe(&error), |database_error| database_error.message().to_string()),
-                    detail: database_error.and_then(|database_error| database_error.detail()).map(str::to_string),
-                    hint: database_error.and_then(|database_error| database_error.hint()).map(str::to_string),
-                },
-            };
+            outcome = failure(&error, index.saturating_sub(1), false);
             break;
+        }
+    }
+    if outcome == ApplyOutcome::Applied {
+        for (index, statement) in after_commit.iter().enumerate() {
+            if let Err(error) = client.batch_execute(statement).await {
+                outcome = failure(&error, statements.len() + index, true);
+                break;
+            }
         }
     }
     driver.abort();
@@ -255,6 +418,33 @@ mod tests {
     }
 
     #[test]
+    fn identity_referential_and_constraint_codes_map_to_their_settings() {
+        assert_eq!([identity("a"), identity("d"), identity("")], [Identity::Always, Identity::ByDefault, Identity::None]);
+        assert_eq!(
+            ["r", "c", "n", "d", "a"].map(referential),
+            [ReferentialAction::Restrict, ReferentialAction::Cascade, ReferentialAction::SetNull, ReferentialAction::SetDefault, ReferentialAction::NoAction]
+        );
+        assert_eq!(
+            [("p", "PRIMARY KEY (id)"), ("u", "UNIQUE (a)"), ("f", "FOREIGN KEY (a) REFERENCES t(id)"), ("c", "CHECK ((a > 0))"), ("x", "EXCLUDE")]
+                .map(|(code, definition)| constraint_kind(code, definition)),
+            [ConstraintKind::PrimaryKey, ConstraintKind::Unique, ConstraintKind::ForeignKey, ConstraintKind::Check, ConstraintKind::Other]
+        );
+        assert_eq!(constraint_kind("u", "UNIQUE (a) DEFERRABLE INITIALLY DEFERRED"), ConstraintKind::Other);
+    }
+
+    #[test]
+    fn an_index_definition_splits_into_keys_and_the_clauses_after_them() {
+        let parts = |definition: &str| index_parts(definition, "btree");
+        assert_eq!(parts("CREATE INDEX i ON public.t USING btree (a, lower(b) DESC) INCLUDE (c) WHERE (a > 0)"), (
+            "a, lower(b) DESC".to_string(),
+            "INCLUDE (c) WHERE (a > 0)".to_string()
+        ));
+        assert_eq!(parts("CREATE INDEX i ON t USING btree (((note || ')'::text)))"), ("((note || ')'::text))".to_string(), String::new()));
+        assert_eq!(parts("CREATE INDEX i ON t USING hash (a)"), (String::new(), String::new()));
+        assert_eq!(parts("CREATE INDEX i ON t USING btree (a"), ("a".to_string(), String::new()));
+    }
+
+    #[test]
     fn volatility_and_parallel_codes_map_to_their_settings() {
         assert_eq!([volatility("i"), volatility("s"), volatility("v")], [Volatility::Immutable, Volatility::Stable, Volatility::Volatile]);
         assert_eq!([parallel("s"), parallel("r"), parallel("u")], [Parallel::Safe, Parallel::Restricted, Parallel::Unsafe]);
@@ -262,10 +452,10 @@ mod tests {
 
     #[tokio::test]
     async fn a_change_that_cannot_connect_is_a_connection_error_and_a_hang_up_is_a_failed_statement() {
-        let refused = apply(&closed_port().await, &["SELECT 1".into()]).await;
+        let refused = apply(&closed_port().await, &["SELECT 1".into()], &[]).await;
         assert_eq!(refused.map_err(|error| crate::testing::parts(error).0), Err("connection".to_string()));
 
-        let hung_up = apply(&fake_server(FakeServer::HangUpOnQuery).await, &["SELECT 1".into()]).await.unwrap();
+        let hung_up = apply(&fake_server(FakeServer::HangUpOnQuery).await, &["SELECT 1".into()], &[]).await.unwrap();
         let failure = &serde_json::to_value(&hung_up).unwrap()["failure"];
         assert_eq!((&failure["statement_index"], &failure["detail"], &failure["hint"]), (&serde_json::json!(0), &serde_json::Value::Null, &serde_json::Value::Null));
     }
@@ -380,12 +570,12 @@ mod tests {
             async move { client.query_one(&sql, &[]).await.unwrap().get::<_, i64>(0) }
         };
 
-        let applied = apply(&live_params(), &[format!("CREATE SEQUENCE {schema}.a"), format!("CREATE SEQUENCE {schema}.b")]).await.unwrap();
-        let failed = apply(&live_params(), &[format!("CREATE SEQUENCE {schema}.c"), format!("CREATE SEQUENCE {schema}.a")]).await.unwrap();
+        let applied = apply(&live_params(), &[format!("CREATE SEQUENCE {schema}.a"), format!("CREATE SEQUENCE {schema}.b")], &[]).await.unwrap();
+        let failed = apply(&live_params(), &[format!("CREATE SEQUENCE {schema}.c"), format!("CREATE SEQUENCE {schema}.a")], &[]).await.unwrap();
 
         assert_eq!(applied, ApplyOutcome::Applied);
         assert_eq!(failed, ApplyOutcome::Failed {
-            failure: ApplyFailure { statement_index: 1, message: "relation \"a\" already exists".into(), detail: None, hint: None }
+            failure: ApplyFailure { statement_index: 1, committed: false, message: "relation \"a\" already exists".into(), detail: None, hint: None }
         });
         assert_eq!((exists("b").await, exists("c").await), (1, 0));
         scratch.finish().await;
@@ -396,11 +586,120 @@ mod tests {
     async fn live_a_failure_keeps_the_servers_detail_and_hint() {
         let scratch = Scratch::new("CREATE TABLE t (n integer); CREATE VIEW v AS SELECT n FROM t;").await;
 
-        let failed = apply(&live_params(), &[format!("DROP TABLE {}.t", scratch.schema)]).await.unwrap();
+        let failed = apply(&live_params(), &[format!("DROP TABLE {}.t", scratch.schema)], &[]).await.unwrap();
 
         let failure = &serde_json::to_value(&failed).unwrap()["failure"];
         assert!(failure["detail"].as_str().unwrap().contains("depends on table"));
         assert_eq!(failure["hint"], "Use DROP ... CASCADE to drop the dependent objects too.");
+        scratch.finish().await;
+    }
+
+    const SHOP: &str = "
+        CREATE TABLE customers (id bigint PRIMARY KEY, email text);
+        CREATE TABLE orders (
+          id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+          customer_id bigint NOT NULL REFERENCES customers ON DELETE CASCADE,
+          quantity integer NOT NULL DEFAULT 1,
+          total numeric GENERATED ALWAYS AS (quantity * 2) STORED,
+          note text,
+          CONSTRAINT one_note UNIQUE (note) DEFERRABLE);
+        ALTER TABLE orders ADD CONSTRAINT positive CHECK (quantity > 0) NOT VALID;
+        COMMENT ON TABLE orders IS 'placed orders';
+        COMMENT ON COLUMN orders.note IS 'free text';
+        CREATE INDEX orders_by_note ON orders (lower(note)) WHERE note IS NOT NULL;
+        CREATE VIEW notes AS SELECT note FROM orders;
+        CREATE TABLE events (at timestamptz) PARTITION BY RANGE (at);";
+
+    async fn table(scratch: &Scratch, name: &str) -> (ObjectRef, TableDefinition) {
+        let object = scratch.object(ObjectType::Table, scratch.oid(&format!("SELECT '{{schema}}.{name}'::regclass::oid")).await);
+        let read = scratch.read(ObjectType::Table, object.oid).await.unwrap();
+        (object, serde_json::from_value(serde_json::to_value(read).unwrap()).unwrap())
+    }
+
+    #[tokio::test]
+    #[ignore = "needs TIDEWATER_TEST_DATABASE_URL pointing at a running Postgres"]
+    async fn live_a_table_reads_back_its_columns_constraints_and_indexes() {
+        let scratch = Scratch::new(SHOP).await;
+        let (_, orders) = table(&scratch, "orders").await;
+        let (_, events) = table(&scratch, "events").await;
+
+        let columns = orders
+            .columns
+            .iter()
+            .map(|column| (column.number, column.name.as_str(), column.data_type.as_str(), column.not_null, column.default.as_str(), column.identity, column.generated.as_str()))
+            .collect::<Vec<_>>();
+        assert_eq!(columns, [
+            (Some(1), "id", "bigint", true, "", Identity::Always, ""),
+            (Some(2), "customer_id", "bigint", true, "", Identity::None, ""),
+            (Some(3), "quantity", "integer", true, "1", Identity::None, ""),
+            (Some(4), "total", "numeric", false, "", Identity::None, "(quantity * 2)"),
+            (Some(5), "note", "text", false, "", Identity::None, ""),
+        ]);
+        assert_eq!((orders.comment.as_deref(), orders.columns[4].comment.as_deref(), orders.partition_key), (Some("placed orders"), Some("free text"), None));
+        let constraints = orders
+            .constraints
+            .iter()
+            .map(|constraint| (constraint.name.as_str(), constraint.kind, constraint.columns.clone(), constraint.references.as_str(), constraint.expression.as_str(), constraint.not_valid))
+            .collect::<Vec<_>>();
+        assert_eq!(constraints, [
+            ("orders_pkey", ConstraintKind::PrimaryKey, vec!["id".to_string()], "", "", false),
+            ("one_note", ConstraintKind::Other, vec!["note".to_string()], "", "UNIQUE (note) DEFERRABLE", false),
+            ("orders_customer_id_fkey", ConstraintKind::ForeignKey, vec!["customer_id".to_string()], "customers", "", false),
+            ("positive", ConstraintKind::Check, vec!["quantity".to_string()], "", "(quantity > 0)", true),
+        ]);
+        assert_eq!(orders.constraints[2].on_delete, ReferentialAction::Cascade);
+        assert_eq!(orders.indexes, [IndexDefinition {
+            original_name: Some("orders_by_note".into()),
+            name: "orders_by_note".into(),
+            unique: false,
+            method: "btree".into(),
+            keys: "lower(note)".into(),
+            clauses: "WHERE (note IS NOT NULL)".into(),
+            concurrently: false,
+        }]);
+        assert_eq!(events.partition_key.as_deref(), Some("RANGE (at)"));
+        assert_eq!(scratch.read(ObjectType::Table, 1).await.map_err(|error| crate::testing::parts(error).0), Err("not_found".to_string()));
+        scratch.finish().await;
+    }
+
+    #[tokio::test]
+    #[ignore = "needs TIDEWATER_TEST_DATABASE_URL pointing at a running Postgres"]
+    async fn live_a_table_change_lists_what_depends_on_dropped_columns_and_constraints_and_builds_indexes_after_the_commit() {
+        let scratch = Scratch::new(SHOP).await;
+        let (orders_ref, orders) = table(&scratch, "orders").await;
+        let (customers_ref, customers) = table(&scratch, "customers").await;
+        let original = ObjectDefinition::Table(orders.clone());
+
+        let mut without_note = orders.clone();
+        without_note.columns.remove(4);
+        let dropped_column = plan(&scratch.client, Some(&orders_ref), Some(&original), Some(&ObjectDefinition::Table(without_note)), options()).await.unwrap();
+        let mut without_key = customers.clone();
+        without_key.constraints.clear();
+        let customers_original = ObjectDefinition::Table(customers);
+        let dropped_key = plan(&scratch.client, Some(&customers_ref), Some(&customers_original), Some(&ObjectDefinition::Table(without_key)), options()).await.unwrap();
+
+        assert_eq!(dropped_column.dependents, ["view notes"]);
+        assert_eq!(dropped_key.dependents, ["constraint orders_customer_id_fkey on table orders"]);
+
+        let mut indexed = orders.clone();
+        indexed.indexes.push(IndexDefinition {
+            original_name: None,
+            name: "orders_by_quantity".into(),
+            unique: false,
+            method: "btree".into(),
+            keys: "quantity".into(),
+            clauses: String::new(),
+            concurrently: true,
+        });
+        indexed.comment = Some("orders placed".into());
+        let built = plan(&scratch.client, Some(&orders_ref), Some(&original), Some(&ObjectDefinition::Table(indexed)), options()).await.unwrap();
+        let applied = apply(&live_params(), &built.statements, &built.after_commit).await.unwrap();
+        let (_, after) = table(&scratch, "orders").await;
+        assert_eq!((applied, after.indexes.len(), after.comment.as_deref()), (ApplyOutcome::Applied, 2, Some("orders placed")));
+
+        let failed = apply(&live_params(), &built.statements, &[format!("CREATE INDEX CONCURRENTLY ON {}.orders (missing)", scratch.schema)]).await.unwrap();
+        let failure = &serde_json::to_value(&failed).unwrap()["failure"];
+        assert_eq!((&failure["statement_index"], &failure["committed"]), (&serde_json::json!(1), &serde_json::json!(true)));
         scratch.finish().await;
     }
 
@@ -416,7 +715,7 @@ mod tests {
         let fails = |result: Result<(), CommandError>| result.map_err(|error| crate::testing::parts(error).0);
 
         assert_eq!(fails(schema_names(&client).await.map(|_| ())), Err("connection".into()));
-        for object_type in [ObjectType::Schema, ObjectType::Sequence, ObjectType::View, ObjectType::Function] {
+        for object_type in [ObjectType::Schema, ObjectType::Table, ObjectType::Sequence, ObjectType::View, ObjectType::Function] {
             assert_eq!(fails(definition(&client, &object(object_type)).await.map(|_| ())), Err("connection".into()), "{object_type:?}");
         }
         let changed_view = ObjectDefinition::View { schema: "public".into(), name: "v".into(), query: "SELECT 2".into(), comment: None };

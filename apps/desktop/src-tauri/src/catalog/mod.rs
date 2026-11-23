@@ -295,7 +295,7 @@ pub async fn children(client: &Client, path: &CatalogPath, show_system: bool) ->
                 .collect())
         }
         CatalogPath::Folder { schema_oid, kind, .. } => match kind {
-            ObjectKind::Table => relations(client, &database, *schema_oid, b"rp", NodeIcon::Table, true, None).await,
+            ObjectKind::Table => relations(client, &database, *schema_oid, b"rp", NodeIcon::Table, true, Some(ObjectType::Table)).await,
             ObjectKind::View => relations(client, &database, *schema_oid, b"v", NodeIcon::View, true, Some(ObjectType::View)).await,
             ObjectKind::MaterializedView => {
                 relations(client, &database, *schema_oid, b"m", NodeIcon::MaterializedView, true, Some(ObjectType::MaterializedView)).await
@@ -544,7 +544,7 @@ CREATE DOMAIN positive_amount AS numeric CHECK (VALUE > 0);
 
     #[tokio::test]
     #[ignore = "needs TIDEWATER_TEST_DATABASE_URL pointing at a running Postgres"]
-    async fn live_marks_the_objects_an_editor_covers_and_leaves_tables_types_aggregates_and_columns_unmarked() {
+    async fn live_marks_the_objects_an_editor_covers_and_leaves_types_aggregates_and_columns_unmarked() {
         let (client, database) = fixture_client().await;
         let schemas = children(&client, &CatalogPath::Database { database: database.clone() }, false).await.unwrap();
         let schema = schemas.iter().find(|node| node.label == "tw_catalog_test").unwrap();
@@ -557,7 +557,7 @@ CREATE DOMAIN positive_amount AS numeric CHECK (VALUE > 0);
 
         assert_eq!(schema.object.as_ref().map(|object| (object.object_type, object.database.as_str())), Some((ObjectType::Schema, database.as_str())));
         assert_eq!(found, vec![
-            vec![None, None],
+            vec![Some(ObjectType::Table), Some(ObjectType::Table)],
             vec![Some(ObjectType::View)],
             vec![Some(ObjectType::MaterializedView)],
             vec![Some(ObjectType::Function), None],

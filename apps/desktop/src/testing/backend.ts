@@ -3,7 +3,7 @@ import type { InvokeArgs } from '@tauri-apps/api/core';
 import type { CatalogNode, CatalogPath } from '../generated/catalog';
 import type { CommandError } from '../generated/errors';
 import type { TabDraft } from '../generated/drafts';
-import type { ChangePlan, ObjectDefinition, ObjectRef } from '../generated/objects';
+import type { ChangePlan, ColumnDefinition, ObjectDefinition, ObjectRef, TableDefinition } from '../generated/objects';
 import type { QueryError, RunResult, StatementOutcome, StatementResult } from '../generated/query';
 import type { ServerGroup, ServerInput, ServerSummary } from '../generated/servers';
 import type { StoreStatusView } from '../generated/store';
@@ -157,5 +157,57 @@ export function routineDefinition(overrides: Partial<Extract<ObjectDefinition, {
 }
 
 export function changePlan(overrides: Partial<ChangePlan> = {}): ChangePlan {
-  return { statements: ['CREATE OR REPLACE VIEW public.open_orders AS SELECT id, total FROM orders'], warnings: [], dependents: [], ...overrides };
+  return {
+    statements: ['CREATE OR REPLACE VIEW public.open_orders AS SELECT id, total FROM orders'],
+    warnings: [],
+    dependents: [],
+    after_commit: [],
+    ...overrides,
+  };
+}
+
+/** order_items: an identity key, a column with a default, a generated one, a primary key, a foreign key and an index. */
+export function tableDefinition(overrides: Partial<TableDefinition> = {}): ObjectDefinition {
+  const column = (number: number, name: string, data_type: string, extra: Partial<ColumnDefinition> = {}): ColumnDefinition => ({
+    number,
+    name,
+    data_type,
+    not_null: false,
+    default: '',
+    identity: 'none',
+    generated: '',
+    using: '',
+    comment: null,
+    ...extra,
+  });
+  return {
+    type: 'table',
+    schema: 'public',
+    name: 'order_items',
+    comment: null,
+    partition_key: null,
+    columns: [
+      column(1, 'id', 'bigint', { not_null: true, identity: 'always' }),
+      column(2, 'quantity', 'integer', { not_null: true, default: '1' }),
+      column(3, 'total', 'numeric', { generated: '(quantity * 2)' }),
+    ],
+    constraints: [
+      {
+        original_name: 'order_items_pkey',
+        name: 'order_items_pkey',
+        kind: 'primary_key',
+        columns: ['id'],
+        references: '',
+        referenced_columns: [],
+        on_update: 'no_action',
+        on_delete: 'no_action',
+        expression: '',
+        not_valid: false,
+      },
+    ],
+    indexes: [
+      { original_name: 'by_quantity', name: 'by_quantity', unique: false, method: 'btree', keys: 'quantity', clauses: '', concurrently: false },
+    ],
+    ...overrides,
+  };
 }
