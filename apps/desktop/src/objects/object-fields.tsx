@@ -1,10 +1,14 @@
-import type { ObjectDefinition } from '../generated/objects';
+import type { ObjectDefinition, ObjectExtras } from '../generated/objects';
 import form from '../servers/servers.module.css';
 import { useObjectEditorStore, type ObjectEditor } from '../store/object-editors';
 import { CodeField } from './code-field';
 import { CommentField, SchemaField, SelectField, TextField, keywords, patch } from './fields';
 import { DatabaseFields, ExtensionFields } from './database-fields';
+import classes from './objects.module.css';
+import { PrivilegesFields } from './privileges-fields';
+import { Sections, type SectionItem } from './sections';
 import { TableFields } from './table-fields';
+import { TriggerFields } from './trigger-fields';
 import { TypeFields } from './type-fields';
 
 function SequenceFields({ model }: { model: { editor: ObjectEditor; draft: Extract<ObjectDefinition, { type: 'sequence' }> } }) {
@@ -121,9 +125,8 @@ function RoutineFields({ model }: { model: { editor: ObjectEditor; draft: Extrac
 }
 
 /** The fields for the draft's kind of object; each change goes straight to the editor's draft. */
-export function DefinitionFields({ editor }: { editor: ObjectEditor }) {
+function DefinitionBody({ editor }: { editor: ObjectEditor }) {
   const draft = editor.draft as ObjectDefinition;
-  if (draft.type === 'table') return <TableFields editor={editor} />;
   if (draft.type === 'type') return <TypeFields editor={editor} />;
   if (draft.type === 'database') return <DatabaseFields editor={editor} />;
   if (draft.type === 'extension') return <ExtensionFields editor={editor} />;
@@ -134,6 +137,26 @@ export function DefinitionFields({ editor }: { editor: ObjectEditor }) {
       {(draft.type === 'view' || draft.type === 'materialized_view') && <QueryFields model={{ editor, draft }} />}
       {draft.type === 'routine' && <RoutineFields model={{ editor, draft }} />}
       <CommentField model={{ editor_id: editor.id, value: draft.comment }} />
+    </div>
+  );
+}
+
+/**
+ * The editor's fields: a table's sections, or the definition beside a view's triggers and the object's privileges,
+ * when its kind has those.
+ */
+export function DefinitionFields({ editor }: { editor: ObjectEditor }) {
+  if (editor.object_type === 'table') return <TableFields editor={editor} />;
+  const body = <DefinitionBody editor={editor} />;
+  const triggers: Array<SectionItem> =
+    editor.object_type === 'view'
+      ? [{ key: 'triggers', label: 'Triggers', count: (editor.extras as ObjectExtras).triggers.length, content: <TriggerFields editor={editor} /> }]
+      : [];
+  const privileges: Array<SectionItem> = editor.privileges.length > 0 ? [{ key: 'privileges', label: 'Privileges', content: <PrivilegesFields editor={editor} /> }] : [];
+  if (triggers.length + privileges.length === 0) return body;
+  return (
+    <div className={classes.table}>
+      <Sections model={{ id: editor.id, label: 'Sections', items: [{ key: 'definition', label: 'Definition', content: body }, ...triggers, ...privileges] }} />
     </div>
   );
 }

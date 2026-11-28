@@ -1,7 +1,16 @@
 import { create } from 'zustand';
 import * as api from '../api/objects';
 import { messageOf } from '../api/errors';
-import type { ApplyFailure, AvailableExtension, ChangeOptions, ChangePlan, ObjectDefinition, ObjectRef, ObjectType } from '../generated/objects';
+import type {
+  ApplyFailure,
+  AvailableExtension,
+  ChangeOptions,
+  ChangePlan,
+  ObjectDefinition,
+  ObjectExtras,
+  ObjectRef,
+  ObjectType,
+} from '../generated/objects';
 import { blankDefinition, capitalized, objectTypeOf, planStatements, qualifiedName, type_labels } from '../objects/describe';
 import { restoreFocusIfLost } from '../shell/focus';
 import { useDialogStore } from './dialogs';
@@ -27,8 +36,17 @@ export type ObjectEditor = {
   schemas: ReadonlyArray<string>;
   /** For an extension's editor, what the server can install. */
   extensions: ReadonlyArray<AvailableExtension>;
-  /** For a database's editor, the roles that can own it. */
+  /** The server's roles, to own a database, hold grants or be named by a policy. */
   roles: ReadonlyArray<string>;
+  /** For a table's or view's editor, the trigger functions its triggers can call. */
+  trigger_functions: ReadonlyArray<string>;
+  /** The object's owner, whose own privileges can't be changed here. */
+  owner: string;
+  /** The privileges the object's kind can be granted, as columns of its grid. */
+  privileges: ReadonlyArray<string>;
+  /** The grants and triggers as they are, or a new object's defaults; `null` until read. */
+  extras_start: ObjectExtras | null;
+  extras: ObjectExtras | null;
   loading: boolean;
   load_error: string | null;
   /** The definition as it is in the database; `null` for a new object. */
@@ -75,9 +93,9 @@ function same(left: ObjectDefinition | null, right: ObjectDefinition | null): bo
   return JSON.stringify(left) === JSON.stringify(right);
 }
 
-/** Whether closing the editor would lose changes not yet applied. */
+/** Whether closing the editor would lose changes not yet applied, to the definition or to its grants and triggers. */
 export function isDirty(editor: ObjectEditor): boolean {
-  return editor.mode !== 'drop' && !same(editor.draft, editor.start);
+  return editor.mode !== 'drop' && (!same(editor.draft, editor.start) || JSON.stringify(editor.extras) !== JSON.stringify(editor.extras_start));
 }
 
 export function editorTitle(editor: ObjectEditor): string {
@@ -128,6 +146,8 @@ type ObjectEditorState = {
   open: (request: EditorRequest) => string;
   load: (id: string) => Promise<void>;
   change: (id: string, draft: ObjectDefinition) => void;
+  /** Changes the grants and triggers the editor will apply beside the definition. */
+  changeExtras: (id: string, extras: ObjectExtras) => void;
   /** Changes some of the draft's fields, by their names in the definition. */
   patch: (id: string, fields: Readonly<Record<string, string | number | boolean | null>>) => void;
   setOptions: (id: string, options: Partial<ChangeOptions>) => void;
@@ -168,8 +188,12 @@ export const useObjectEditorStore = create<ObjectEditorState>()((set, get) => {
     void refreshTree(editor, (editor.plan as ChangePlan).closes_database);
     if (!editor.object) return;
     try {
-      const current = await api.objectDefinition(editor.server_id, editor.object as ObjectRef);
-      update(id, { original: current, start: current, draft: current });
+      const object = editor.object as ObjectRef;
+      const [current, read] = await Promise.all([
+        api.objectDefinition(editor.server_id, object),
+        api.objectExtras(editor.server_id, editor.database, object, editor.object_type),
+      ]);
+      update(id, { original: current, start: current, draft: current, extras_start: read.extras, extras: read.extras });
     } catch (error) {
       update(id, { apply_error: messageOf(error) });
     }
@@ -211,6 +235,11 @@ export const useObjectEditorStore = create<ObjectEditorState>()((set, get) => {
         schemas: request.schema ? [request.schema] : [],
         extensions: [],
         roles: [],
+        trigger_functions: [],
+        owner: '',
+        privileges: [],
+        extras_start: null,
+        extras: null,
         loading: true,
         load_error: null,
         original: null,
@@ -241,18 +270,35 @@ export const useObjectEditorStore = create<ObjectEditorState>()((set, get) => {
       const editing = editor.mode !== 'drop';
       const wants = (type: ObjectType) => editing && editor.object_type === type;
       const wants_schemas = editing && editor.object_type !== 'schema' && editor.object_type !== 'database';
+      const wants_triggers = wants('table') || wants('view');
+      const { server_id, database } = editor;
       try {
-        const [schemas, extensions, roles, original] = await Promise.all([
-          wants_schemas ? api.listSchemas(editor.server_id, editor.database) : editor.schemas,
-          wants('extension') ? api.availableExtensions(editor.server_id, editor.database) : editor.extensions,
-          wants('database') ? api.listRoles(editor.server_id, editor.database) : editor.roles,
-          editor.object ? api.objectDefinition(editor.server_id, editor.object) : null,
+        const [schemas, extensions, roles, trigger_functions, read, original] = await Promise.all([
+          wants_schemas ? api.listSchemas(server_id, database) : editor.schemas,
+          wants('extension') ? api.availableExtensions(server_id, database) : editor.extensions,
+          editing ? api.listRoles(server_id, database) : editor.roles,
+          wants_triggers ? api.listTriggerFunctions(server_id, database) : editor.trigger_functions,
+          editing ? api.objectExtras(server_id, database, editor.object, editor.object_type) : null,
+          editor.object ? api.objectDefinition(server_id, editor.object) : null,
         ]);
-        update(id, { loading: false, schemas, extensions, roles, ...(original && { original, start: original, draft: original }) });
+        update(id, {
+          loading: false,
+          schemas,
+          extensions,
+          roles,
+          trigger_functions,
+          ...(read && { owner: read.owner, privileges: read.privileges, extras_start: read.extras, extras: read.extras }),
+          ...(original && { original, start: original, draft: original }),
+        });
         if (editor.mode === 'drop') await get().plan(id);
       } catch (error) {
         update(id, { loading: false, load_error: messageOf(error) });
       }
+    },
+
+    changeExtras: (id, extras) => {
+      update(id, { extras, failure: null, apply_error: null });
+      schedulePlan(id);
     },
 
     change: (id, draft) => {
@@ -286,7 +332,8 @@ export const useObjectEditorStore = create<ObjectEditorState>()((set, get) => {
       update(id, { planning: true });
       const changed = editor.mode === 'drop' ? null : editor.draft;
       try {
-        const plan = await api.planObjectChange(editor.server_id, editor.database, editor.object, editor.original, changed, editor.options);
+        const extras = changed && editor.extras_start && editor.extras ? { original: editor.extras_start, changed: editor.extras } : null;
+        const plan = await api.planObjectChange(editor.server_id, editor.database, editor.object, editor.original, changed, editor.options, extras);
         if (plan_runs.get(id) === run) update(id, { planning: false, plan, plan_error: null });
       } catch (error) {
         if (plan_runs.get(id) === run) update(id, { planning: false, plan: null, plan_error: messageOf(error) });

@@ -7,7 +7,7 @@ use crate::connections::probe::{ProbeResult, probe};
 use crate::connections::url::{ParsedConnection, parse_connection_string};
 use crate::connections::{ConnectParams, ConnectionInfo, ConnectionManager};
 use crate::error::CommandError;
-use crate::objects::model::{AvailableExtension, ChangeOptions, ChangePlan, ObjectDefinition, ObjectRef};
+use crate::objects::model::{AvailableExtension, ChangeOptions, ChangePlan, ExtrasChange, ExtrasRead, ObjectDefinition, ObjectRef, ObjectType};
 use crate::objects::{self, ApplyOutcome};
 use crate::files::drafts::{DraftSnapshot, DraftStore, RestoredTabs};
 use crate::files::{self, FileStamp, OpenedFile, SaveOutcome};
@@ -190,6 +190,32 @@ pub async fn available_extensions(
     objects::available_extensions(&client).await
 }
 
+/// An object's grants, owner and triggers, or with no object what a new one of `object_type` starts with.
+#[tauri::command(rename_all = "snake_case")]
+pub async fn object_extras(
+    store: State<'_, Store>,
+    connections: State<'_, ConnectionManager>,
+    server_id: String,
+    database: String,
+    object: Option<ObjectRef>,
+    object_type: ObjectType,
+) -> Result<ExtrasRead, CommandError> {
+    let client = connections.client(&server_id, &params_for(&store, &server_id, &database)?).await?;
+    objects::object_extras(&client, object.as_ref(), object_type).await
+}
+
+/// The database's trigger functions, for a trigger to call.
+#[tauri::command(rename_all = "snake_case")]
+pub async fn list_trigger_functions(
+    store: State<'_, Store>,
+    connections: State<'_, ConnectionManager>,
+    server_id: String,
+    database: String,
+) -> Result<Vec<String>, CommandError> {
+    let client = connections.client(&server_id, &params_for(&store, &server_id, &database)?).await?;
+    objects::trigger_functions(&client).await
+}
+
 /// The server's roles, for choosing an owner.
 #[tauri::command(rename_all = "snake_case")]
 pub async fn list_roles(
@@ -238,9 +264,10 @@ pub async fn plan_object_change(
     original: Option<ObjectDefinition>,
     changed: Option<ObjectDefinition>,
     options: ChangeOptions,
+    extras: Option<ExtrasChange>,
 ) -> Result<ChangePlan, CommandError> {
     let client = connections.client(&server_id, &params_for(&store, &server_id, &database)?).await?;
-    objects::plan(&client, object.as_ref(), original.as_ref(), changed.as_ref(), options).await
+    objects::plan(&client, object.as_ref(), original.as_ref(), changed.as_ref(), options, extras.as_ref()).await
 }
 
 /// Runs a plan's statements in one transaction, rolling all of them back if one fails, then each after-commit statement.
@@ -412,14 +439,17 @@ mod tests {
         let app = test_app();
         let with_arguments = [
             "unlock_store", "save_server", "delete_server", "save_group", "delete_group", "test_connection", "connect_server",
-            "disconnect_server", "catalog_children", "list_schemas", "available_extensions", "list_roles", "object_definition", "plan_object_change", "apply_object_change", "run_query", "fetch_more_rows", "cancel_query", "close_query_tab", "cancel_connect",
+            "disconnect_server", "catalog_children", "list_schemas", "available_extensions", "list_roles", "object_extras", "list_trigger_functions", "object_definition", "plan_object_change", "apply_object_change", "run_query", "fetch_more_rows", "cancel_query", "close_query_tab", "cancel_connect",
             "set_key_storage", "save_tab_drafts",
         ];
 
         for command in ["store_status", "start_fresh_store", "list_servers", "list_connections", "key_storage", "load_tab_drafts"].iter().chain(&with_arguments) {
             assert!(refusal(&no_state, command).starts_with("state not managed"), "{command}");
         }
-        for command in ["delete_server", "connect_server", "catalog_children", "list_schemas", "available_extensions", "list_roles", "object_definition", "plan_object_change", "apply_object_change"] {
+        for command in [
+            "delete_server", "connect_server", "catalog_children", "list_schemas", "available_extensions", "list_roles", "object_extras",
+            "list_trigger_functions", "object_definition", "plan_object_change", "apply_object_change",
+        ] {
             assert!(refusal(&store_only, command).starts_with("state not managed for field `connections`"), "{command}");
         }
         assert!(refusal(&store_only, "run_query").starts_with("state not managed for field `queries`"));
@@ -429,6 +459,12 @@ mod tests {
             json!({ "server_id": "a", "database": "b", "statements": [], "after_commit": [], "closes_database": 7 }),
         );
         assert!(unreadable_database.unwrap_err().as_str().unwrap().contains("closes_database"));
+        for (command, args, key) in [
+            ("object_extras", json!({ "server_id": "a", "database": "b", "object": 7, "object_type": "table" }), "object"),
+            ("plan_object_change", json!({ "server_id": "a", "database": "b", "options": { "cascade": false, "with_data": false, "force": false }, "extras": 7 }), "extras"),
+        ] {
+            assert!(app.invoke(command, args).unwrap_err().as_str().unwrap().contains(key), "{command}");
+        }
         for command in with_arguments {
             assert!(refusal(&app, command).contains("missing required key"), "{command}");
         }
@@ -623,6 +659,8 @@ mod tests {
             ("apply_object_change", json!({ "server_id": saved["id"], "database": "template1", "statements": [], "after_commit": [], "closes_database": "postgres" })),
             ("available_extensions", json!({ "server_id": saved["id"], "database": "postgres" })),
             ("list_roles", json!({ "server_id": saved["id"], "database": "postgres" })),
+            ("object_extras", json!({ "server_id": saved["id"], "database": "postgres", "object_type": "table" })),
+            ("list_trigger_functions", json!({ "server_id": saved["id"], "database": "postgres" })),
         ];
         for (command, args) in calls {
             assert_eq!(app.invoke(command, args).map_err(kind), Err("connection".into()), "{command}");
@@ -634,6 +672,8 @@ mod tests {
             ("apply_object_change", json!({ "server_id": "missing", "database": "postgres", "statements": [], "after_commit": [] })),
             ("available_extensions", json!({ "server_id": "missing", "database": "postgres" })),
             ("list_roles", json!({ "server_id": "missing", "database": "postgres" })),
+            ("object_extras", json!({ "server_id": "missing", "database": "postgres", "object_type": "table" })),
+            ("list_trigger_functions", json!({ "server_id": "missing", "database": "postgres" })),
         ] {
             assert_eq!(app.invoke(command, args).map_err(kind), Err("not_found".into()), "{command}");
         }
@@ -648,6 +688,8 @@ mod tests {
             ("apply_object_change", json!({ "server_id": "a", "database": "b", "statements": [] }), "after_commit"),
             ("available_extensions", json!({ "server_id": "a" }), "database"),
             ("list_roles", json!({ "server_id": "a" }), "database"),
+            ("object_extras", json!({ "server_id": "a", "database": "b" }), "object_type"),
+            ("list_trigger_functions", json!({ "server_id": "a" }), "database"),
         ] {
             let refused = app.invoke(command, args).unwrap_err();
             assert!(refused.as_str().unwrap().contains(&format!("missing required key {missing}")), "{command}");
@@ -681,6 +723,9 @@ mod tests {
         let extensions = app.invoke("available_extensions", json!({ "server_id": id, "database": live.database })).unwrap();
         assert!(roles.as_array().unwrap().contains(&json!(live.user)));
         assert!(extensions.as_array().unwrap().iter().any(|extension| extension["name"] == "plpgsql"));
+        let extras = app.invoke("object_extras", json!({ "server_id": id, "database": live.database, "object_type": "schema" })).unwrap();
+        let functions = app.invoke("list_trigger_functions", json!({ "server_id": id, "database": live.database })).unwrap();
+        assert_eq!((extras["owner"].clone(), functions.is_array()), (json!(live.user), true));
         let oid = app.invoke("catalog_children", json!({ "server_id": id, "path": { "level": "database", "database": live.database }, "show_system": false })).unwrap()
             .as_array().unwrap().iter().find(|node| node["label"] == json!(schema)).unwrap()["object"].clone();
         let read = app.invoke("object_definition", json!({ "server_id": id, "object": oid })).unwrap();

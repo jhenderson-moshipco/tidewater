@@ -3,7 +3,17 @@ import type { InvokeArgs } from '@tauri-apps/api/core';
 import type { CatalogNode, CatalogPath } from '../generated/catalog';
 import type { CommandError } from '../generated/errors';
 import type { TabDraft } from '../generated/drafts';
-import type { AvailableExtension, ChangePlan, ColumnDefinition, DatabaseDefinition, ObjectDefinition, ObjectRef, TableDefinition, TypeDefinition } from '../generated/objects';
+import type {
+  AvailableExtension,
+  ChangePlan,
+  ColumnDefinition,
+  DatabaseDefinition,
+  ExtrasRead,
+  ObjectDefinition,
+  ObjectRef,
+  TableDefinition,
+  TypeDefinition,
+} from '../generated/objects';
 import type { QueryError, RunResult, StatementOutcome, StatementResult } from '../generated/query';
 import type { ServerGroup, ServerInput, ServerSummary } from '../generated/servers';
 import type { StoreStatusView } from '../generated/store';
@@ -209,6 +219,9 @@ export function tableDefinition(overrides: Partial<TableDefinition> = {}): Objec
     indexes: [
       { original_name: 'by_quantity', name: 'by_quantity', unique: false, method: 'btree', keys: 'quantity', clauses: '', concurrently: false },
     ],
+    row_security: false,
+    force_row_security: false,
+    policies: [],
     ...overrides,
   };
 }
@@ -251,3 +264,14 @@ export function databaseDefinition(overrides: Partial<DatabaseDefinition> = {}):
 export function availableExtension(overrides: Partial<AvailableExtension> = {}): AvailableExtension {
   return { name: 'citext', default_version: '1.6', versions: ['1.5', '1.6'], installed: false, comment: 'case-insensitive text', ...overrides };
 }
+
+export function extrasRead(overrides: Partial<ExtrasRead> = {}): ExtrasRead {
+  return { owner: 'app', privileges: ['SELECT', 'INSERT'], extras: { grants: [], triggers: [] }, ...overrides };
+}
+
+/** The commands every object editor calls while it loads, answered with an empty object. */
+export const editor_basics = {
+  list_roles: () => ['app', 'reporting'],
+  list_trigger_functions: () => ['touch'],
+  object_extras: () => extrasRead(),
+};

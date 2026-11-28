@@ -1,5 +1,4 @@
 import { IconPlus, IconPointFilled, IconX } from '@tabler/icons-react';
-import { useState, type KeyboardEvent } from 'react';
 import type {
   ColumnDefinition,
   ConstraintDefinition,
@@ -7,6 +6,7 @@ import type {
   Identity,
   IndexDefinition,
   ObjectDefinition,
+  ObjectExtras,
   ReferentialAction,
   TableDefinition,
 } from '../generated/objects';
@@ -14,15 +14,12 @@ import form from '../servers/servers.module.css';
 import { useObjectEditorStore, type ObjectEditor } from '../store/object-editors';
 import { useServerStore } from '../store/servers';
 import { blankColumn } from './describe';
+import { PolicyFields } from './policy-fields';
+import { PrivilegesFields } from './privileges-fields';
+import { Sections, type SectionItem } from './sections';
+import { TriggerFields } from './trigger-fields';
 import classes from './objects.module.css';
 
-type Section = 'columns' | 'constraints' | 'indexes';
-
-const sections: ReadonlyArray<{ section: Section; label: string }> = [
-  { section: 'columns', label: 'Columns' },
-  { section: 'constraints', label: 'Constraints' },
-  { section: 'indexes', label: 'Indexes' },
-];
 
 const common_types = [
   'bigint',
@@ -648,26 +645,19 @@ function Indexes({ model }: { model: { editor: ObjectEditor; table: TableDraft }
   );
 }
 
-function moveAmong(event: KeyboardEvent<HTMLButtonElement>, index: number, show: (section: Section) => void): void {
-  const keys: Readonly<Record<string, number>> = { ArrowRight: index + 1, ArrowLeft: index - 1, Home: 0, End: sections.length - 1 };
-  const target = keys[event.key];
-  if (target === undefined) return;
-  event.preventDefault();
-  const next = (target + sections.length) % sections.length;
-  show((sections[next] as (typeof sections)[number]).section);
-  event.currentTarget.parentElement?.querySelectorAll<HTMLButtonElement>('[role="tab"]')[next]?.focus();
-}
 
-/** A table's name and comment, then its columns, constraints and indexes, one section at a time. */
+/** A table's name and comment, then its columns, constraints, indexes, triggers, policies and privileges, one section at a time. */
 export function TableFields({ editor }: { editor: ObjectEditor }) {
-  const [shown, setShown] = useState<Section>('columns');
   const table = editor.draft as TableDraft;
-  const counts: Readonly<Record<Section, number>> = {
-    columns: table.columns.length,
-    constraints: table.constraints.length,
-    indexes: table.indexes.length,
-  };
-  const tab_id = (section: Section) => `${editor.id}-section-${section}`;
+  const extras = editor.extras as ObjectExtras;
+  const items: Array<SectionItem> = [
+    { key: 'columns', label: 'Columns', count: table.columns.length, content: <Columns model={{ editor, table }} /> },
+    { key: 'constraints', label: 'Constraints', count: table.constraints.length, content: <Constraints model={{ editor, table }} /> },
+    { key: 'indexes', label: 'Indexes', count: table.indexes.length, content: <Indexes model={{ editor, table }} /> },
+    { key: 'triggers', label: 'Triggers', count: extras.triggers.length, content: <TriggerFields editor={editor} /> },
+    { key: 'policies', label: 'Policies', count: table.policies.length, content: <PolicyFields editor={editor} /> },
+    { key: 'privileges', label: 'Privileges', content: <PrivilegesFields editor={editor} /> },
+  ];
 
   return (
     <div className={classes.table}>
@@ -707,29 +697,7 @@ export function TableFields({ editor }: { editor: ObjectEditor }) {
         </label>
         {table.partition_key && <p className={`${form.hint} ${form.span6}`}>Partitioned by {table.partition_key}</p>}
       </div>
-      <div role="tablist" aria-label="Table sections" className={classes.sections}>
-        {sections.map((option, index) => (
-          <button
-            key={option.section}
-            type="button"
-            role="tab"
-            id={tab_id(option.section)}
-            aria-selected={option.section === shown}
-            aria-controls={`${editor.id}-section-panel`}
-            tabIndex={option.section === shown ? 0 : -1}
-            className={classes.section}
-            onClick={() => setShown(option.section)}
-            onKeyDown={(event) => moveAmong(event, index, setShown)}
-          >
-            {option.label} <span className={classes.muted}>{counts[option.section]}</span>
-          </button>
-        ))}
-      </div>
-      <div role="tabpanel" id={`${editor.id}-section-panel`} aria-labelledby={tab_id(shown)} className={classes.sectionPanel}>
-        {shown === 'columns' && <Columns model={{ editor, table }} />}
-        {shown === 'constraints' && <Constraints model={{ editor, table }} />}
-        {shown === 'indexes' && <Indexes model={{ editor, table }} />}
-      </div>
+      <Sections model={{ id: editor.id, label: 'Table sections', items }} />
     </div>
   );
 }

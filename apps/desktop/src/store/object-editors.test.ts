@@ -10,6 +10,8 @@ import {
   server,
   unlocked,
   viewDefinition,
+  editor_basics,
+  extrasRead,
 } from '../testing/backend';
 import { useDialogStore } from './dialogs';
 import {
@@ -46,6 +48,7 @@ const drop_view: EditorRequest = { ...edit_view, mode: 'drop' };
 /** Answers the commands an editor needs, with `plan` deciding each plan's reply. */
 function backend(plan: (args: Record<string, unknown>) => unknown = () => changePlan(), definition: ObjectDefinition = viewDefinition()) {
   return mockCommands({
+    ...editor_basics,
     list_schemas: () => ['public', 'sales'],
     object_definition: () => definition,
     plan_object_change: plan,
@@ -101,19 +104,20 @@ describe('opening an object editor', () => {
 
     expect(editor(id).draft).toEqual({ type: 'view', schema: 'sales', name: '', query: '', comment: null });
     expect([editorTitle(editor(id)), isDirty(editor(id))]).toEqual(['New view', false]);
-    expect(commandsOf(calls)).toEqual(['list_schemas']);
+    expect(commandsOf(calls)).not.toContain('object_definition');
   });
 
   it('starts a new schema with no schema of its own to go in, and lists none to pick from', async () => {
     const calls = backend();
     const id = await opened({ ...create_view, object_type: 'schema', schema: null });
 
-    expect([editor(id).draft, editor(id).schemas, calls]).toEqual([{ type: 'schema', name: '', comment: null }, [], []]);
+    expect([editor(id).draft, editor(id).schemas, commandsOf(calls)]).toEqual([{ type: 'schema', name: '', comment: null }, [], ['list_roles', 'object_extras']]);
   });
 
   it('shows why the definition could not be read, and reads it again on retry', async () => {
     let fail = true;
     mockCommands({
+      ...editor_basics,
       list_schemas: () => ['public'],
       object_definition: () => (fail ? failWith('not_found', 'This object no longer exists.') : viewDefinition()),
     });
@@ -144,6 +148,7 @@ describe('the SQL preview', () => {
       original: viewDefinition(),
       changed,
       options: { cascade: false, with_data: true, force: false },
+      extras: { original: extrasRead().extras, changed: extrasRead().extras },
     });
     expect(editor(id)).toMatchObject({ planning: false, plan: changePlan(), plan_error: null });
     expect(canReview(editor(id))).toBe(true);
@@ -324,6 +329,7 @@ describe('reviewing and applying', () => {
   it('keeps the editor open with the statement that failed, which rolled every statement back', async () => {
     const failure = { statement_index: 1, message: 'column "total" does not exist', detail: null, hint: null };
     mockCommands({
+      ...editor_basics,
       list_schemas: () => ['public'],
       object_definition: () => viewDefinition(),
       plan_object_change: () => changePlan(),
@@ -342,6 +348,7 @@ describe('reviewing and applying', () => {
     const failure = { statement_index: 1, committed: true, message: 'could not create index', detail: null, hint: null };
     let reads = 0;
     mockCommands({
+      ...editor_basics,
       list_schemas: () => ['public'],
       object_definition: () => (++reads === 1 ? viewDefinition() : reads === 2 ? viewDefinition({ query: 'SELECT id, total FROM orders' }) : failWith('connection', 'connection refused')),
       plan_object_change: () => changePlan(),
@@ -364,7 +371,7 @@ describe('reviewing and applying', () => {
   it('keeps a new object\'s editor open with the failure when a statement after the commit fails, as there is nothing to read back', async () => {
     const failure = { statement_index: 1, committed: true, message: 'comment failed', detail: null, hint: null };
     const plan = changePlan({ statements: [], after_commit: ['CREATE DATABASE shop', "COMMENT ON DATABASE shop IS 'x'"] });
-    const calls = mockCommands({ list_roles: () => ['app'], plan_object_change: () => plan, apply_object_change: () => ({ outcome: 'failed', failure }) });
+    const calls = mockCommands({ ...editor_basics, plan_object_change: () => plan, apply_object_change: () => ({ outcome: 'failed', failure }) });
     const refreshServer = vi.fn(async () => undefined);
     useTreeStore.setState({ refreshServer });
     const id = await opened({ ...create_view, object_type: 'database', schema: null });
@@ -380,6 +387,7 @@ describe('reviewing and applying', () => {
 
   it('shows why the change could not be sent at all, such as a lost connection', async () => {
     mockCommands({
+      ...editor_basics,
       list_schemas: () => ['public'],
       object_definition: () => viewDefinition(),
       plan_object_change: () => changePlan(),

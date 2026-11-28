@@ -133,6 +133,121 @@ pub struct TableDefinition {
     pub constraints: Vec<ConstraintDefinition>,
     /// The table's indexes, leaving out those that back a primary key or unique constraint.
     pub indexes: Vec<IndexDefinition>,
+    /// Whether row-level security filters rows by the table's policies.
+    pub row_security: bool,
+    /// Whether the policies apply to the table's owner too.
+    pub force_row_security: bool,
+    pub policies: Vec<PolicyDefinition>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "snake_case")]
+#[ts(export, export_to = "objects.ts")]
+pub enum PolicyCommand {
+    All,
+    Select,
+    Insert,
+    Update,
+    Delete,
+}
+
+/// A row-level security policy on a table.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "objects.ts")]
+pub struct PolicyDefinition {
+    /// The policy's name in the database; null for a new one.
+    pub original_name: Option<String>,
+    pub name: String,
+    pub command: PolicyCommand,
+    /// Permissive policies widen what a role sees; restrictive ones narrow it.
+    pub permissive: bool,
+    /// The roles it applies to; empty for every role (PUBLIC).
+    pub roles: Vec<String>,
+    /// Which existing rows it lets through; empty for none of its own.
+    pub using: String,
+    /// Which new or changed rows it accepts; empty for none of its own.
+    pub with_check: String,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "snake_case")]
+#[ts(export, export_to = "objects.ts")]
+pub enum TriggerTiming {
+    Before,
+    After,
+    InsteadOf,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "snake_case")]
+#[ts(export, export_to = "objects.ts")]
+pub enum TriggerEvent {
+    Insert,
+    Update,
+    Delete,
+    Truncate,
+}
+
+/// A trigger on a table or view.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "objects.ts")]
+pub struct TriggerDefinition {
+    /// The trigger's name in the database; null for a new one.
+    pub original_name: Option<String>,
+    pub name: String,
+    pub timing: TriggerTiming,
+    pub events: Vec<TriggerEvent>,
+    /// The columns an UPDATE must touch to fire it; empty for any.
+    pub update_columns: Vec<String>,
+    /// Fire once per row rather than once per statement.
+    pub for_each_row: bool,
+    /// The condition a row must meet to fire it; empty for none.
+    pub when: String,
+    /// The trigger function, as SQL names it.
+    pub function: String,
+    /// The arguments passed to the function, as SQL writes them.
+    pub arguments: String,
+    /// Create `function` in the same change, as a PL/pgSQL function with `body`.
+    pub new_function: bool,
+    pub body: String,
+    pub enabled: bool,
+}
+
+/// A privilege a role holds on an object.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "objects.ts")]
+pub struct Grant {
+    /// The role, or `PUBLIC` for every role.
+    pub grantee: String,
+    pub privilege: String,
+    /// Whether the grantee can grant it on (WITH GRANT OPTION).
+    pub grantable: bool,
+}
+
+/// What an object has besides its definition: its grants, and a table's or view's triggers.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "objects.ts")]
+pub struct ObjectExtras {
+    /// The grants to roles other than the owner.
+    pub grants: Vec<Grant>,
+    pub triggers: Vec<TriggerDefinition>,
+}
+
+/// An object's extras as they are, with its owner and the privileges its kind has, in the order a grid shows them.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, TS)]
+#[ts(export, export_to = "objects.ts")]
+pub struct ExtrasRead {
+    pub owner: String,
+    pub privileges: Vec<String>,
+    pub extras: ObjectExtras,
+}
+
+/// The extras before and after an edit, planned with the definition.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "objects.ts")]
+pub struct ExtrasChange {
+    pub original: ObjectExtras,
+    pub changed: ObjectExtras,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
