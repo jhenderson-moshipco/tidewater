@@ -56,8 +56,11 @@ describe('menu commands', () => {
     await vi.waitFor(() => expect(commandsOf(calls)).toHaveLength(4));
 
     useQueryTabStore.setState({ active_id: null });
-    for (const command of ['run_statement', 'run_all', 'cancel_query', 'save_query', 'save_query_as']) await emit('menu', command);
-    expect(commandsOf(calls)).toHaveLength(4);
+    const tab_commands = ['run_statement', 'run_all', 'cancel_query', 'save_query', 'save_query_as', 'close_tab'];
+    for (const command of [...tab_commands, 'begin_transaction', 'commit_transaction', 'rollback_transaction', 'find', 'format_sql']) {
+      await emit('menu', command);
+    }
+    expect([commandsOf(calls).length, useQueryTabStore.getState().order]).toEqual([4, [id]]);
   });
 
   it('open a .sql file, and save or save as the active tab', async () => {
@@ -73,5 +76,24 @@ describe('menu commands', () => {
     await emit('menu', 'save_query_as');
 
     await vi.waitFor(() => expect(commandsOf(calls)).toEqual(['plugin:dialog|open', 'plugin:dialog|save', 'plugin:dialog|save']));
+  });
+
+  it('begin, commit and roll back the active tab, and close it', async () => {
+    const calls = mockCommands({ transaction_control: () => ({ transaction: 'idle', results_closed: false, notices: [] }), close_query_tab: () => null });
+    listenToMenuCommands();
+    const tabs = useQueryTabStore.getState();
+    const id = tabs.openTab({ server_id: 'orders-dev', database: 'orders' });
+
+    await vi.waitFor(async () => {
+      await emit('menu', 'begin_transaction');
+      expect(commandsOf(calls)).toHaveLength(1);
+    });
+    await emit('menu', 'commit_transaction');
+    await vi.waitFor(() => expect(commandsOf(calls)).toHaveLength(2));
+    await emit('menu', 'rollback_transaction');
+    await vi.waitFor(() => expect(calls.map((call) => (call.args as { action: string }).action)).toEqual(['begin', 'commit', 'rollback']));
+    await emit('menu', 'close_tab');
+
+    await vi.waitFor(() => expect(useQueryTabStore.getState().tabs[id]).toBeUndefined());
   });
 });

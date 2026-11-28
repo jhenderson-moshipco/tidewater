@@ -1,10 +1,12 @@
 import { defaultKeymap, history, historyKeymap } from '@codemirror/commands';
+import { search, searchKeymap } from '@codemirror/search';
 import { PostgreSQL, sql } from '@codemirror/lang-sql';
 import { HighlightStyle, bracketMatching, syntaxHighlighting } from '@codemirror/language';
 import { EditorState, type Extension } from '@codemirror/state';
 import { EditorView, drawSelection, highlightActiveLine, keymap, lineNumbers } from '@codemirror/view';
 import { tags } from '@lezer/highlight';
 import { useQueryTabStore, type QueryTab } from '../store/query-tabs';
+import { formatView } from './editor-commands';
 import classes from './query.module.css';
 
 /** Each tab's editor state while another tab is showing, so its undo history survives a tab switch. */
@@ -49,9 +51,12 @@ function extensions(tab_id: string, title: string): Array<Extension> {
       { key: 'Mod-Enter', run: () => (void tabs().run(tab_id, 'statement'), true) },
       { key: 'Shift-Mod-Enter', run: () => (void tabs().run(tab_id, 'all'), true) },
       { key: 'Mod-.', run: () => (void tabs().cancel(tab_id), true) },
+      { key: 'Shift-Alt-f', run: (view) => (formatView(view), true) },
+      ...searchKeymap,
       ...defaultKeymap,
       ...historyKeymap,
     ]),
+    search({ top: true }),
     EditorView.contentAttributes.of({ 'aria-label': `SQL editor, ${title}` }),
     EditorView.updateListener.of((update) => {
       if (update.docChanged) tabs().setText(tab_id, update.state.doc.toString());
@@ -61,6 +66,20 @@ function extensions(tab_id: string, title: string): Array<Extension> {
       }
     }),
   ];
+}
+
+/** The open editor of a query tab, while that tab is showing. */
+export function editorViewOf(tab_id: string): EditorView | undefined {
+  return open_views.get(tab_id);
+}
+
+/** Puts `text` in place of the tab's selection and focuses its editor; `false` when the tab isn't showing. */
+export function insertIntoEditor(tab_id: string, text: string): boolean {
+  const view = open_views.get(tab_id);
+  if (!view) return false;
+  view.dispatch(view.state.replaceSelection(text));
+  view.focus();
+  return true;
 }
 
 /** Moves the tab's cursor to `position` and focuses its editor. */

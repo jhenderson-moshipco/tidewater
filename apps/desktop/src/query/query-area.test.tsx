@@ -428,3 +428,34 @@ describe('the results grid inside the panel', () => {
     expect(screen.getByRole('gridcell').textContent).toBe(long);
   });
 });
+
+describe('transaction controls in the toolbar', () => {
+  it('offers Begin, then Commit and Roll back while a transaction is open, and only Roll back once it has failed', async () => {
+    withServers();
+    let next = 'open';
+    const calls = mockCommands({ transaction_control: () => ({ transaction: next, results_closed: false, notices: [] }) });
+    openTab('SELECT 1');
+    const { user } = renderWithUser(<Workspace />);
+
+    await user.click(screen.getByRole('button', { name: 'Begin' }));
+    expect(screen.getByText('Transaction open')).toBeTruthy();
+    next = 'idle';
+    await user.click(screen.getByRole('button', { name: 'Commit' }));
+    next = 'open';
+    await user.click(screen.getByRole('button', { name: 'Begin' }));
+    act(() => useQueryTabStore.setState((state) => ({ tabs: Object.fromEntries(Object.entries(state.tabs).map(([key, tab]) => [key, { ...tab, transaction: 'failed' }])) })));
+    expect([screen.getByText('Transaction failed'), screen.queryByRole('button', { name: 'Commit' })]).toEqual([expect.anything(), null]);
+    next = 'idle';
+    await user.click(screen.getByRole('button', { name: 'Roll back' }));
+
+    expect(calls.map((call) => (call.args as { action: string }).action)).toEqual(['begin', 'commit', 'begin', 'rollback']);
+    expect(screen.getByRole('button', { name: 'Begin' })).toBeTruthy();
+  });
+
+  it('keeps Begin off on a tab with no connection', () => {
+    withServers();
+    openTab('', null);
+    renderWithUser(<Workspace />);
+    expect(screen.getByRole('button', { name: 'Begin' }).hasAttribute('disabled')).toBe(true);
+  });
+});

@@ -1,16 +1,19 @@
 //! The native application menu
 
 use tauri::menu::{AboutMetadata, IsMenuItem, Menu, MenuEvent, MenuItem, MenuItemKind, PredefinedMenuItem, Submenu};
-use tauri::{AppHandle, Emitter, Runtime};
+use tauri::{AppHandle, Emitter, Manager, Runtime};
 
 /// these id's get forwarded to the frontend
-const FORWARDED: [&str; 16] = [
+const FORWARDED: [&str; 22] = [
     "new_query_tab",
     "new_connection",
     "open_settings",
     "open_sql_file",
     "save_query",
     "save_query_as",
+    "close_tab",
+    "find",
+    "format_sql",
     "view_explorer",
     "view_search",
     "view_files",
@@ -21,7 +24,13 @@ const FORWARDED: [&str; 16] = [
     "run_statement",
     "run_all",
     "cancel_query",
+    "begin_transaction",
+    "commit_transaction",
+    "rollback_transaction",
 ];
+
+/// Closes the window, which Rust does itself since ⌘W is the menu's Close Tab.
+const CLOSE_WINDOW: &str = "close_window";
 
 enum Entry {
     Action(&'static str, &'static str, Option<&'static str>),
@@ -42,7 +51,6 @@ enum SystemItem {
     #[cfg(target_os = "macos")]
     ShowAll,
     Quit,
-    CloseWindow,
     Undo,
     Redo,
     Cut,
@@ -85,7 +93,8 @@ const FILE_MENU: &[Entry] = &[
     Planned("Import Settings…", None),
     Planned("Export Settings…", None),
     System(Separator),
-    System(CloseWindow),
+    Action("close_tab", "Close Tab", Some("CmdOrCtrl+W")),
+    Action(CLOSE_WINDOW, "Close Window", Some("CmdOrCtrl+Shift+W")),
     #[cfg(not(target_os = "macos"))]
     System(Quit),
 ];
@@ -99,8 +108,8 @@ const EDIT_MENU: &[Entry] = &[
     System(Paste),
     System(SelectAll),
     System(Separator),
-    Planned("Find", Some("CmdOrCtrl+F")),
-    Planned("Format SQL", Some("Alt+Shift+F")),
+    Action("find", "Find", Some("CmdOrCtrl+F")),
+    Action("format_sql", "Format SQL", Some("Alt+Shift+F")),
 ];
 
 const VIEW_MENU: &[Entry] = &[
@@ -128,9 +137,9 @@ const QUERY_MENU: &[Entry] = &[
     Planned("Explain", Some("CmdOrCtrl+E")),
     Planned("Explain Analyze", Some("CmdOrCtrl+Alt+E")),
     System(Separator),
-    Planned("Begin Transaction", None),
-    Planned("Commit", Some("CmdOrCtrl+Shift+C")),
-    Planned("Rollback", Some("CmdOrCtrl+Shift+R")),
+    Action("begin_transaction", "Begin Transaction", None),
+    Action("commit_transaction", "Commit", Some("CmdOrCtrl+Shift+C")),
+    Action("rollback_transaction", "Roll Back", Some("CmdOrCtrl+Shift+R")),
 ];
 
 const SERVER_MENU: &[Entry] = &[
@@ -192,7 +201,6 @@ fn system_item<R: Runtime>(app: &AppHandle<R>, item: &SystemItem) -> tauri::Resu
         #[cfg(target_os = "macos")]
         ShowAll => PredefinedMenuItem::show_all(app, None),
         Quit => PredefinedMenuItem::quit(app, None),
-        CloseWindow => PredefinedMenuItem::close_window(app, None),
         Undo => PredefinedMenuItem::undo(app, None),
         Redo => PredefinedMenuItem::redo(app, None),
         Cut => PredefinedMenuItem::cut(app, None),
@@ -237,6 +245,12 @@ pub fn build<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<Menu<R>> {
 /// forwards events to the client
 pub fn forward<R: Runtime>(app: &AppHandle<R>, event: MenuEvent) {
     let id = event.id().as_ref();
+    if id == CLOSE_WINDOW {
+        if let Some(window) = app.get_webview_window("main") {
+            let _ = window.close();
+        }
+        return;
+    }
     if FORWARDED.contains(&id) {
         let _ = app.emit("menu", id);
     }
@@ -260,7 +274,9 @@ mod tests {
             let menu_items = items.iter().filter_map(MenuItemKind::as_menuitem);
             enabled.extend(menu_items.filter(|item| item.is_enabled().unwrap()).map(|item| item.id().0.clone()));
         }
-        assert_eq!(enabled, FORWARDED.to_vec());
+        let mut expected = FORWARDED.to_vec();
+        expected.insert(expected.iter().position(|id| *id == "close_tab").unwrap() + 1, CLOSE_WINDOW);
+        assert_eq!(enabled, expected);
     }
 
     #[test]
@@ -273,6 +289,19 @@ mod tests {
         forward(app.handle(), MenuEvent { id: "view_search".into() });
 
         assert_eq!(received.recv().unwrap(), "\"view_search\"");
+        assert!(received.try_recv().is_err());
+    }
+
+    #[test]
+    fn close_window_is_handled_in_rust_with_or_without_a_main_window_and_never_reaches_the_frontend() {
+        let app = tauri::test::mock_app();
+        let (sender, received) = mpsc::channel();
+        app.listen_any("menu", move |event| sender.send(event.payload().to_string()).unwrap());
+        forward(app.handle(), MenuEvent { id: CLOSE_WINDOW.into() });
+        tauri::WebviewWindowBuilder::new(&app, "main", Default::default()).build().unwrap();
+
+        forward(app.handle(), MenuEvent { id: CLOSE_WINDOW.into() });
+
         assert!(received.try_recv().is_err());
     }
 }

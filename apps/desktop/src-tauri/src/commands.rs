@@ -12,7 +12,7 @@ use crate::objects::{self, ApplyOutcome};
 use crate::files::drafts::{DraftSnapshot, DraftStore, RestoredTabs};
 use crate::files::{self, FileStamp, OpenedFile, SaveOutcome};
 use crate::query::split::{self, StatementSpan};
-use crate::query::{QuerySessions, RowBatch, RunResult};
+use crate::query::{ControlResult, QuerySessions, RowBatch, RunResult, TransactionAction};
 use crate::servers::model::{GroupInput, PasswordChange, ServerGroup, ServerInput, ServerListView, ServerSummary};
 use crate::servers::store::{ServerStore, StoreStatusView};
 use crate::servers::vault::{AppVault, KeyStorage};
@@ -154,6 +154,19 @@ pub async fn run_query(
     let mut params = store.read(|list| Ok(ConnectParams::from(list.find(&server_id)?)))?;
     params.database = database;
     queries.run(&tab_id, &server_id, &params, &sql).await
+}
+
+/// Begins, commits or rolls back the transaction on the tab's session for this server and database.
+#[tauri::command(rename_all = "snake_case")]
+pub async fn transaction_control(
+    store: State<'_, Store>,
+    queries: State<'_, QuerySessions>,
+    tab_id: String,
+    server_id: String,
+    database: String,
+    action: TransactionAction,
+) -> Result<ControlResult, CommandError> {
+    queries.control(&tab_id, &server_id, &params_for(&store, &server_id, &database)?, action).await
 }
 
 #[tauri::command(rename_all = "snake_case")]
@@ -439,7 +452,7 @@ mod tests {
         let app = test_app();
         let with_arguments = [
             "unlock_store", "save_server", "delete_server", "save_group", "delete_group", "test_connection", "connect_server",
-            "disconnect_server", "catalog_children", "list_schemas", "available_extensions", "list_roles", "object_extras", "list_trigger_functions", "object_definition", "plan_object_change", "apply_object_change", "run_query", "fetch_more_rows", "cancel_query", "close_query_tab", "cancel_connect",
+            "disconnect_server", "catalog_children", "list_schemas", "available_extensions", "list_roles", "object_extras", "list_trigger_functions", "object_definition", "plan_object_change", "apply_object_change", "run_query", "transaction_control", "fetch_more_rows", "cancel_query", "close_query_tab", "cancel_connect",
             "set_key_storage", "save_tab_drafts",
         ];
 
@@ -453,6 +466,7 @@ mod tests {
             assert!(refusal(&store_only, command).starts_with("state not managed for field `connections`"), "{command}");
         }
         assert!(refusal(&store_only, "run_query").starts_with("state not managed for field `queries`"));
+        assert!(refusal(&store_only, "transaction_control").starts_with("state not managed for field `queries`"));
         assert!(refusal(&without_queries, "apply_object_change").starts_with("state not managed for field `queries`"));
         let unreadable_database = app.invoke(
             "apply_object_change",
@@ -563,6 +577,10 @@ mod tests {
         let run = json!({ "tab_id": "tab", "server_id": "missing", "database": "postgres", "sql": "SELECT 1" });
 
         assert_eq!(app.invoke("run_query", run).map_err(kind), Err("not_found".into()));
+        let begin = json!({ "tab_id": "tab", "server_id": "missing", "database": "postgres", "action": "begin" });
+        assert_eq!(app.invoke("transaction_control", begin).map_err(kind), Err("not_found".into()));
+        let unknown_action = json!({ "tab_id": "tab", "server_id": "missing", "database": "postgres", "action": "savepoint" });
+        assert!(app.invoke("transaction_control", unknown_action).unwrap_err().as_str().unwrap().contains("action"));
         assert_eq!(app.invoke("fetch_more_rows", json!({ "tab_id": "tab" })).map_err(kind), Err("invalid".into()));
         assert_eq!(app.invoke("cancel_query", json!({ "tab_id": "tab" })), Ok(Value::Null));
         assert_eq!(app.invoke("close_query_tab", json!({ "tab_id": "tab" })), Ok(Value::Null));
@@ -590,6 +608,8 @@ mod tests {
 
         assert_eq!((run["transaction"].as_str(), run["statements"][0]["outcome"]["has_more"].as_bool()), (Some("holding_results"), Some(true)));
         assert_eq!(more["rows"][0][0], "501");
+        let begun = app.invoke("transaction_control", json!({ "tab_id": "other", "server_id": id, "database": live.database, "action": "begin" })).unwrap();
+        assert_eq!(begun["transaction"], "open");
         let heard = tokio::time::timeout(std::time::Duration::from_secs(5), closed.recv()).await.unwrap();
         assert_eq!(heard.as_deref(), Some("\"tab\""));
         assert_eq!(app.invoke("delete_server", json!({ "id": id })), Ok(Value::Null));

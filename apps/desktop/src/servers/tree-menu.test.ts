@@ -1,11 +1,12 @@
 import { describe, expect, it, vi } from 'vitest';
 import type { TreeRow } from './tree-rows';
 import { useDialogStore } from '../store/dialogs';
+import { useQueryTabStore } from '../store/query-tabs';
 import { useObjectEditorStore, type EditorRequest } from '../store/object-editors';
 import { useWorkspaceStore } from '../store/workspace';
 import { useServerStore } from '../store/servers';
 import { useTreeStore } from '../store/tree';
-import { catalogNode, commandsOf, group, mockCommands, objectRef, server } from '../testing/backend';
+import { catalogNode, commandsOf, failWith, group, mockCommands, objectRef, server } from '../testing/backend';
 import { disconnectServer, retryRow, rowMenu, showContextMenu } from './tree-menu';
 
 const info = { server_id: 'orders-dev', database: 'orders', server_version: '17.2', encryption: null };
@@ -116,16 +117,38 @@ describe('rowMenu', () => {
     expect(refreshRow).toHaveBeenCalledTimes(1);
   });
 
-  it('offers to edit or drop an object, also in the place Settings does not pick, and opens each', () => {
+  it('offers to query, script, edit or drop an object, also in the place Settings does not pick, and opens each', async () => {
     const open = vi.fn((_request: EditorRequest) => 'editor-a');
     useObjectEditorStore.setState({ open });
-    const view = row({ type: 'node', server_id: 'orders-dev', node: catalogNode('db:orders/rel:1', 'open_orders', null, null, objectRef()) });
-    const in_dialog = rowMenu(view, []);
+    const view = { ...row({ type: 'node', server_id: 'orders-dev', node: catalogNode('db:orders/rel:1', 'open_orders', null, null, objectRef()) }), parent_id: 'views' };
+    const ancestors = [{ ...row({ type: 'loading' }), id: 'views', parent_id: 'public' }, { ...row({ type: 'loading' }), id: 'public', label: 'public' }];
+    const in_dialog = rowMenu(view, ancestors);
     useWorkspaceStore.getState().setObjectEditorHost('tab');
-    const in_tab = rowMenu(view, []);
+    const in_tab = rowMenu(view, ancestors);
 
-    expect(texts(in_dialog)).toEqual(['Edit…', 'Edit in Tab', 'Drop…', '—', 'Refresh (off)', 'Copy Name']);
-    expect(texts(in_tab).slice(0, 2)).toEqual(['Edit…', 'Edit in Dialog']);
+    expect(texts(in_dialog)).toEqual([
+      'Select Top 100 Rows',
+      'Count Rows',
+      'Insert Name',
+      'Script as CREATE',
+      '—',
+      'Edit…',
+      'Edit in Tab',
+      'Drop…',
+      '—',
+      'Refresh (off)',
+      'Copy Name',
+    ]);
+    expect(texts(in_tab).slice(5, 7)).toEqual(['Edit…', 'Edit in Dialog']);
+    const calls = mockCommands({
+      run_query: () => ({ statements: [], transaction: 'idle', session_replaced: false }),
+      object_definition: () => failWith('not_found', 'gone'),
+    });
+    for (const text of ['Select Top 100 Rows', 'Count Rows', 'Insert Name', 'Script as CREATE']) run(in_dialog, text);
+    await vi.waitFor(() => expect(commandsOf(calls).sort()).toEqual(['object_definition', 'run_query', 'run_query']));
+    expect(useQueryTabStore.getState().order).toHaveLength(3);
+    const schema = row({ type: 'node', server_id: 'orders-dev', node: catalogNode('db:orders/schema:1', 'sales', null, null, objectRef({ object_type: 'schema' })) });
+    expect(texts(rowMenu(schema, [])).slice(0, 3)).toEqual(['Insert Name', 'Script as CREATE', '—']);
     run(in_dialog, 'Edit…');
     run(in_dialog, 'Edit in Tab');
     run(in_tab, 'Edit in Dialog');

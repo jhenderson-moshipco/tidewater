@@ -405,3 +405,25 @@
     background: Highlight;
   }
 }
+
+.transaction {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.transactionState {
+  padding: 0 8px;
+  border-radius: 4px;
+  background: var(--tw-env-staging-bg);
+  color: var(--tw-env-staging);
+  font-size: var(--tw-font-size-small);
+  line-height: 22px;
+  white-space: nowrap;
+}
+
+.transactionState[data-state='failed'] {
+  background: transparent;
+  color: var(--tw-danger);
+  outline: 1px solid var(--tw-danger);
+}

@@ -71,6 +71,7 @@ fn with_commands<R: Runtime>(builder: Builder<R>) -> Builder<R> {
             commands::apply_object_change,
             commands::split_statements,
             commands::run_query,
+            commands::transaction_control,
             commands::fetch_more_rows,
             commands::cancel_query,
             commands::close_query_tab,

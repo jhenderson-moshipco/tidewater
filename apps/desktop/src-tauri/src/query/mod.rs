@@ -10,7 +10,7 @@ use std::sync::{Arc, Mutex, Weak};
 use std::time::{Duration, Instant};
 
 use futures_util::StreamExt;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use tauri::async_runtime::JoinHandle;
 use tokio_postgres::error::{DbError, ErrorPosition};
 use tokio_postgres::{AsyncMessage, CancelToken, Client, SimpleQueryMessage, SimpleQueryRow};
@@ -136,6 +136,25 @@ pub struct RowBatch {
     pub elapsed_ms: f64,
     pub notices: Vec<Notice>,
     pub transaction: TransactionStatus,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize, TS)]
+#[serde(rename_all = "snake_case")]
+#[ts(export, export_to = "query.ts")]
+pub enum TransactionAction {
+    Begin,
+    Commit,
+    Rollback,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, TS)]
+#[ts(export, export_to = "query.ts")]
+pub struct ControlResult {
+    pub transaction: TransactionStatus,
+    /// Whether results held open for fetch more closed with the transaction.
+    pub results_closed: bool,
+    /// What the server said, such as a warning that no transaction was open.
+    pub notices: Vec<Notice>,
 }
 
 /// A cursor left open for fetch more.
@@ -311,13 +330,9 @@ impl QuerySessions {
     }
 
     /// Runs each statement in `sql` in order on the tab's session, stopping at the first that fails.
-    pub async fn run(&self, tab_id: &str, server_id: &str, params: &ConnectParams, sql: &str) -> Result<RunResult, CommandError> {
-        let statements = split::split(sql);
-        if statements.is_empty() {
-            return Err(CommandError::Invalid("There is no statement to run.".into()));
-        }
-        let tab = self.tab(tab_id);
-        let mut guard = tab.session.lock().await;
+    /// The tab's session on this server and database, opening one when it has none or its last one ended. Refuses to
+    /// move a session with an open transaction to another connection. Says whether a session that ended was replaced.
+    async fn ensure_session(tab: &Tab, guard: &mut Option<Session>, server_id: &str, params: &ConnectParams) -> Result<bool, CommandError> {
         let same_target = |session: &Session| session.server_id == server_id && session.database == params.database;
         if let Some(session) = guard.as_mut().filter(|session| !same_target(session) && !session.client.is_closed()) {
             session.close_results().await;
@@ -334,6 +349,17 @@ impl QuerySessions {
             *tab.cancel.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = Some((session.client.cancel_token(), params.tls));
             *guard = Some(session);
         }
+        Ok(session_replaced)
+    }
+
+    pub async fn run(&self, tab_id: &str, server_id: &str, params: &ConnectParams, sql: &str) -> Result<RunResult, CommandError> {
+        let statements = split::split(sql);
+        if statements.is_empty() {
+            return Err(CommandError::Invalid("There is no statement to run.".into()));
+        }
+        let tab = self.tab(tab_id);
+        let mut guard = tab.session.lock().await;
+        let session_replaced = Self::ensure_session(&tab, &mut guard, server_id, params).await?;
         let session = guard.as_mut().expect("the tab has a session");
         session.results_timeout_ms = params.session.results_timeout_ms;
         session.close_results().await;
@@ -356,6 +382,28 @@ impl QuerySessions {
         self.schedule_close(tab_id, &tab, session, generation);
         let transaction = session.transaction().await;
         Ok(RunResult { statements: results, transaction, session_replaced })
+    }
+
+    /// Begins, commits or rolls back the tab's transaction on its session, leaving its results on screen. Any cursor
+    /// still open for fetch more closes first, since ending the transaction would close it anyway.
+    pub async fn control(&self, tab_id: &str, server_id: &str, params: &ConnectParams, action: TransactionAction) -> Result<ControlResult, CommandError> {
+        let tab = self.tab(tab_id);
+        let mut guard = tab.session.lock().await;
+        if action != TransactionAction::Begin && guard.as_ref().is_none_or(|session| session.client.is_closed()) {
+            return Err(CommandError::Invalid("This tab has no transaction to end.".into()));
+        }
+        Self::ensure_session(&tab, &mut guard, server_id, params).await?;
+        let session = guard.as_mut().expect("the tab has a session");
+        let results_closed = session.open.is_some();
+        session.close_results().await;
+        session.take_notices();
+        let sql = match action {
+            TransactionAction::Begin => "BEGIN",
+            TransactionAction::Commit => "COMMIT",
+            TransactionAction::Rollback => "ROLLBACK",
+        };
+        session.client.batch_execute(sql).await.map_err(|error| CommandError::Connection(query_error(&error, None).message))?;
+        Ok(ControlResult { transaction: session.transaction().await, results_closed, notices: session.take_notices() })
     }
 
     /// The next batch from the tab's open cursor.
@@ -766,6 +814,51 @@ mod tests {
 
         assert_eq!(failed, Err(CommandError::Connection("division by zero".into())));
         assert_eq!(run(&sessions, "ROLLBACK").await.transaction, TransactionStatus::Idle);
+    }
+
+    #[tokio::test]
+    async fn beginning_a_transaction_on_an_unreachable_server_is_a_connection_error() {
+        let (sessions, _) = sessions();
+        let refused = sessions.control("tab", "server-a", &crate::testing::closed_port().await, TransactionAction::Begin).await;
+        assert_eq!(refused.map(|_| ()).map_err(|error| crate::testing::parts(error).0), Err("connection".to_string()));
+    }
+
+    #[tokio::test]
+    #[ignore = "needs TIDEWATER_TEST_DATABASE_URL pointing at a running Postgres"]
+    async fn live_begin_commit_and_roll_back_change_the_transaction_and_close_held_results() {
+        let (sessions, _) = sessions();
+        let params = live_params();
+        let control = |action| sessions.control("tab", "server-a", &params, action);
+
+        let refused = control(TransactionAction::Commit).await.unwrap_err();
+        assert_eq!(crate::testing::parts(refused).1, "This tab has no transaction to end.");
+        let begun = control(TransactionAction::Begin).await.unwrap();
+        assert_eq!((begun.transaction, begun.results_closed), (TransactionStatus::Open, false));
+        let committed = control(TransactionAction::Commit).await.unwrap();
+        let warned = control(TransactionAction::Rollback).await.unwrap();
+        assert_eq!((committed.transaction, warned.transaction), (TransactionStatus::Idle, TransactionStatus::Idle));
+        assert_eq!(warned.notices[0].message, "there is no transaction in progress");
+
+        let held = run(&sessions, "SELECT generate_series(1, 1200)").await;
+        assert_eq!(held.transaction, TransactionStatus::HoldingResults);
+        let begun_over_results = control(TransactionAction::Begin).await.unwrap();
+        assert_eq!((begun_over_results.transaction, begun_over_results.results_closed), (TransactionStatus::Open, true));
+        assert_eq!(control(TransactionAction::Rollback).await.unwrap().transaction, TransactionStatus::Idle);
+    }
+
+    #[tokio::test]
+    #[ignore = "needs TIDEWATER_TEST_DATABASE_URL pointing at a running Postgres"]
+    async fn live_a_commit_the_server_refuses_reports_why_and_the_transaction_is_gone() {
+        let (sessions, _) = sessions();
+        let table = format!("tw_deferred_{}", uuid::Uuid::new_v4().simple());
+        run(&sessions, &format!("CREATE TABLE {table} (id int UNIQUE DEFERRABLE INITIALLY DEFERRED)")).await;
+        sessions.control("tab", "server-a", &live_params(), TransactionAction::Begin).await.unwrap();
+        run(&sessions, &format!("INSERT INTO {table} VALUES (1), (1)")).await;
+
+        let refused = sessions.control("tab", "server-a", &live_params(), TransactionAction::Commit).await.unwrap_err();
+
+        assert!(crate::testing::parts(refused).1.contains("duplicate key"));
+        assert_eq!(run(&sessions, &format!("DROP TABLE {table}")).await.transaction, TransactionStatus::Idle);
     }
 
     #[tokio::test]

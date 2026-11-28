@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import type { RowBatch } from '../generated/query';
 import { commandsOf, deferred, failWith, mockCommands, queryError, rowsOutcome, runResult, statement } from '../testing/backend';
 import { useDialogStore } from './dialogs';
-import { isUnsaved, useQueryTabStore } from './query-tabs';
+import { isUnsaved, useQueryTabStore, type QueryTab } from './query-tabs';
 
 const tabs = () => useQueryTabStore.getState();
 const tab = (id: string) => tabs().tabs[id];
@@ -285,5 +285,63 @@ describe('the query tab store', () => {
     expect(tabs().active_id).toBe('x');
     tabs().restore([], null, '');
     expect([tabs().active_id, tabs().next_number]).toEqual([null, 1]);
+  });
+});
+
+describe('transaction controls', () => {
+  const done = (transaction: string, overrides: Record<string, unknown> = {}) => () => ({ transaction, results_closed: false, notices: [], ...overrides });
+
+  it('begins, commits and rolls back on the tab, saying what happened and what the server said', async () => {
+    let answer = done('open');
+    const calls = mockCommands({ transaction_control: () => answer() });
+    const id = tabs().openTab(connection);
+
+    await tabs().control(id, 'begin');
+    expect([tab(id)?.transaction, tabs().announcement]).toEqual(['open', 'Transaction begun.']);
+    answer = done('idle', { notices: [{ severity: 'WARNING', message: 'there is no transaction in progress', detail: null, hint: null }] });
+    await tabs().control(id, 'commit');
+    expect([tab(id)?.transaction, tabs().announcement]).toEqual(['idle', 'Committed. The server said: there is no transaction in progress.']);
+    answer = done('idle');
+    await tabs().control(id, 'rollback');
+
+    expect(tabs().announcement).toBe('Rolled back.');
+    expect(calls[0]?.args).toEqual({ tab_id: id, server_id: 'orders-dev', database: 'orders', action: 'begin' });
+  });
+
+  it('stops offering more rows once ending the transaction closes the results it held', async () => {
+    mockCommands({ transaction_control: done('idle', { results_closed: true }) });
+    const id = tabs().openTab(connection);
+    const held = runResult([statement({ kind: 'command', rows_affected: 0 }), statement(rowsOutcome([['1']], { has_more: true }))]);
+    useQueryTabStore.setState((state) => ({ tabs: { ...state.tabs, [id]: { ...(state.tabs[id] as QueryTab), result: held } } }));
+
+    await tabs().control(id, 'commit');
+
+    expect(tab(id)?.result?.statements[1]?.outcome).toMatchObject({ has_more: false });
+  });
+
+  it('keeps a result whose last statement held no rows, and a tab with no result', async () => {
+    mockCommands({ transaction_control: done('idle', { results_closed: true }) });
+    const id = tabs().openTab(connection);
+    await tabs().control(id, 'commit');
+    expect(tab(id)?.result).toBeNull();
+    const command = runResult([statement({ kind: 'command', rows_affected: 0 })]);
+    useQueryTabStore.setState((state) => ({ tabs: { ...state.tabs, [id]: { ...(state.tabs[id] as QueryTab), result: command } } }));
+    await tabs().control(id, 'commit');
+    expect(tab(id)?.result).toBe(command);
+  });
+
+  it('asks for a connection first, ignores a busy or missing tab, and shows why the server refused', async () => {
+    mockCommands({ transaction_control: () => failWith('connection', 'duplicate key value violates unique constraint') });
+    const unconnected = tabs().openTab(null);
+    await tabs().control(unconnected, 'begin');
+    expect(tabs().announcement).toBe('Choose a connection for this tab first.');
+    await tabs().control('gone', 'begin');
+
+    const id = tabs().openTab(connection);
+    await tabs().control(id, 'commit');
+    expect([tab(id)?.error, tab(id)?.status]).toEqual(['duplicate key value violates unique constraint', 'idle']);
+    useQueryTabStore.setState((state) => ({ tabs: { ...state.tabs, [id]: { ...(state.tabs[id] as QueryTab), status: 'running' } } }));
+    await tabs().control(id, 'rollback');
+    expect(tab(id)?.status).toBe('running');
   });
 });
