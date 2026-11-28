@@ -129,3 +129,8 @@ export function blankDefinition(type: ObjectType, schema: string): ObjectDefinit
     }
   }
 }
+
+/** A name as SQL spells it, quoted unless it is plain lowercase. */
+export function sqlName(name: string): string {
+  return /^[a-z_][a-z0-9_$]*$/.test(name) ? name : `"${name.replaceAll('"', '""')}"`;
+}

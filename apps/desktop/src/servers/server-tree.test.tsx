@@ -291,7 +291,7 @@ describe('editing objects from the tree', () => {
 
     const shortcuts = [/^orders-dev/, /^orders$/, /^public/, /^Types/, /^open_orders/, /^id$/].map((label) => item(label).getAttribute('aria-keyshortcuts'));
 
-    expect(shortcuts).toEqual(['Insert', 'Insert', 'F2 Delete', 'Insert', 'F2 Delete', null]);
+    expect(shortcuts).toEqual(['Insert', 'Insert', 'F2 Delete', 'Insert', 'Meta+Enter F2 Delete', null]);
     expect(screen.queryByRole('button', { name: /Edit|New/ })).toBeNull();
   });
 
@@ -321,6 +321,20 @@ describe('editing objects from the tree', () => {
       ['create', 'type', 'public'],
     ]);
     expect(open.mock.calls[0]?.[0]).toMatchObject({ server_id: 'orders-dev', database: 'orders', object: view_ref, label: 'open_orders' });
+  });
+
+  it('selects the top rows of a view with ⌘↵ and does nothing on a row it cannot query', async () => {
+    objectTree();
+    const calls = mockCommands({ run_query: () => ({ statements: [], transaction: 'idle', session_replaced: false }) });
+    renderWithUser(<ServerTree />);
+
+    act(() => useTreeStore.setState({ active_id: item(/^Types/).id.slice('tree-row-'.length) }));
+    fireEvent.keyDown(tree(), { key: 'Enter', ctrlKey: true });
+    act(() => useTreeStore.setState({ active_id: item(/^open_orders/).id.slice('tree-row-'.length) }));
+    fireEvent.keyDown(tree(), { key: 'Enter', metaKey: true });
+
+    await vi.waitFor(() => expect(commandsOf(calls)).toEqual(['run_query']));
+    expect(calls[0]?.args).toMatchObject({ database: 'orders', sql: 'SELECT *\nFROM public.open_orders\nLIMIT 100' });
   });
 
   it('opens editors from the pencil and +, selecting their row first', async () => {

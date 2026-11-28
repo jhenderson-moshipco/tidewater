@@ -16,7 +16,7 @@ export function queryTabId(id: string): string {
 }
 
 /** Closes a query tab or an object editor's tab, each asking first when that would lose changes. */
-function requestClose(id: string): void {
+export function requestClose(id: string): void {
   const editors = useObjectEditorStore.getState();
   if (editors.editors[id]) editors.requestClose(id);
   else useQueryTabStore.getState().requestClose(id);

@@ -23,6 +23,7 @@ import { useState, type KeyboardEvent, type MouseEvent, type UIEvent } from 'rea
 import type { NodeIcon } from '../generated/catalog';
 import { type_labels } from '../objects/describe';
 import { createFromRow, creatableObject, dropRow, editRow, editableObject } from '../objects/open-editor';
+import { isQueryable, selectTopRows, sqlTarget } from '../query/tree-queries';
 import { useDialogStore } from '../store/dialogs';
 import { useExplorerStore } from '../store/explorer';
 import { useServerStore, type ConnectionState } from '../store/servers';
@@ -101,6 +102,11 @@ function shortcut(event: KeyboardEvent<HTMLDivElement>, row: TreeRow, rows: Read
     void useServerStore.getState().cancelConnect(item.server.id);
     return true;
   }
+  if (event.key === 'Enter' && (event.metaKey || event.ctrlKey)) {
+    const target = sqlTarget(row, rows);
+    if (isQueryable(target)) selectTopRows(target);
+    return true;
+  }
   if (event.key === 'Enter') {
     activate(row, rows);
     return true;
@@ -144,6 +150,7 @@ function objectShortcut(key: string, row: TreeRow, rows: ReadonlyArray<TreeRow>)
 function rowShortcuts(row: TreeRow, rows: ReadonlyArray<TreeRow>): string | undefined {
   const keys = [
     row.item.type === 'server' && row.item.connection?.status === 'connecting' && 'Escape',
+    isQueryable(sqlTarget(row, rows)) && 'Meta+Enter',
     editableObject(row) && 'F2 Delete',
     creatableObject(row, rows) && 'Insert',
   ].filter(Boolean);

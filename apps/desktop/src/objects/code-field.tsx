@@ -1,4 +1,5 @@
 import { defaultKeymap, history, historyKeymap } from '@codemirror/commands';
+import { search, searchKeymap } from '@codemirror/search';
 import { PostgreSQL, sql } from '@codemirror/lang-sql';
 import { bracketMatching } from '@codemirror/language';
 import { EditorState } from '@codemirror/state';
@@ -25,7 +26,8 @@ export function CodeField({ model }: { model: CodeFieldModel }) {
           sql({ dialect: PostgreSQL }),
           sql_highlighting,
           sql_theme,
-          keymap.of([...defaultKeymap, ...historyKeymap]),
+          keymap.of([...searchKeymap, ...defaultKeymap, ...historyKeymap]),
+          search({ top: true }),
           EditorView.contentAttributes.of({ 'aria-label': model.label }),
           EditorView.updateListener.of((update) => {
             if (update.docChanged) store().patch(model.editor_id, { [model.field]: update.state.doc.toString() });

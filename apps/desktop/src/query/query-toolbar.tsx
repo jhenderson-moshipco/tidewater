@@ -1,10 +1,41 @@
 import { IconChevronDown, IconLock, IconPlayerPlay } from '@tabler/icons-react';
+import type { TransactionAction } from '../generated/query';
 import server_classes from '../servers/servers.module.css';
 import { environmentLabel } from '../servers/connection-form';
 import { useDialogStore } from '../store/dialogs';
 import { useQueryTabStore } from '../store/query-tabs';
 import { useServerStore } from '../store/servers';
 import classes from './query.module.css';
+
+/** Begin while no transaction is open; Commit and Roll back while one is, and only Roll back once it has failed. */
+function TransactionControls({ model }: { model: { tab_id: string; disabled: boolean } }) {
+  const transaction = useQueryTabStore((state) => state.tabs[model.tab_id]?.transaction ?? null);
+  const button = `${server_classes.button} ${classes.toolbarButton}`;
+  const control = (action: TransactionAction) => void useQueryTabStore.getState().control(model.tab_id, action);
+
+  if (transaction !== 'open' && transaction !== 'failed') {
+    return (
+      <button type="button" className={button} disabled={model.disabled} onClick={() => control('begin')}>
+        Begin
+      </button>
+    );
+  }
+  return (
+    <span className={classes.transaction}>
+      <span className={classes.transactionState} data-state={transaction}>
+        {transaction === 'open' ? 'Transaction open' : 'Transaction failed'}
+      </span>
+      {transaction === 'open' && (
+        <button type="button" aria-keyshortcuts="Meta+Shift+C" className={button} disabled={model.disabled} onClick={() => control('commit')}>
+          Commit
+        </button>
+      )}
+      <button type="button" aria-keyshortcuts="Meta+Shift+R" className={button} disabled={model.disabled} onClick={() => control('rollback')}>
+        Roll back
+      </button>
+    </span>
+  );
+}
 
 export function QueryToolbar({ tab_id }: { tab_id: string }) {
   const connection = useQueryTabStore((state) => state.tabs[tab_id]?.connection ?? null);
@@ -75,6 +106,7 @@ export function QueryToolbar({ tab_id }: { tab_id: string }) {
       >
         Cancel
       </button>
+      <TransactionControls model={{ tab_id, disabled: status !== 'idle' || !connection }} />
       <span className={server_classes.spacer} />
       {path && <span className={classes.filePath}>{path}</span>}
       {limits.length > 0 && (

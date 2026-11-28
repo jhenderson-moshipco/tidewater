@@ -13,7 +13,7 @@ import type {
 import form from '../servers/servers.module.css';
 import { useObjectEditorStore, type ObjectEditor } from '../store/object-editors';
 import { useServerStore } from '../store/servers';
-import { blankColumn } from './describe';
+import { blankColumn, sqlName } from './describe';
 import { PolicyFields } from './policy-fields';
 import { PrivilegesFields } from './privileges-fields';
 import { Sections, type SectionItem } from './sections';
@@ -79,11 +79,6 @@ function replaced<T>(list: ReadonlyArray<T>, index: number, item: T): Array<T> {
 
 function without<T>(list: ReadonlyArray<T>, index: number): Array<T> {
   return list.filter((_, position) => position !== index);
-}
-
-/** A name as SQL spells it, quoted unless it is plain lowercase. */
-function sqlName(name: string): string {
-  return /^[a-z_][a-z0-9_$]*$/.test(name) ? name : `"${name.replaceAll('"', '""')}"`;
 }
 
 function columnLabel(column: ColumnDefinition, index: number): string {

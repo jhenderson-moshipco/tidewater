@@ -3,6 +3,7 @@ import { LogicalPosition } from '@tauri-apps/api/dpi';
 import { Menu } from '@tauri-apps/api/menu';
 import { capitalized, type_labels } from '../objects/describe';
 import { createFromRow, creatableObject, dropRow, editRow, editableObject } from '../objects/open-editor';
+import { countRows, insertName, isQueryable, scriptCreate, selectTopRows, sqlTarget } from '../query/tree-queries';
 import { useDialogStore } from '../store/dialogs';
 import { useServerStore } from '../store/servers';
 import { useTreeStore } from '../store/tree';
@@ -30,6 +31,18 @@ export async function disconnectServer(server_id: string, name: string): Promise
 
 function titleCase(text: string): string {
   return text.split(' ').map(capitalized).join(' ');
+}
+
+/** A node's entries that open its object in a query tab, or put its name in one. */
+function queryEntries(row: TreeRow, rows: ReadonlyArray<TreeRow>): Array<MenuEntry> {
+  const target = sqlTarget(row, rows);
+  if (!target) return [];
+  const entries: Array<MenuEntry> = [];
+  if (isQueryable(target)) {
+    entries.push({ text: 'Select Top 100 Rows', action: () => selectTopRows(target) }, { text: 'Count Rows', action: () => countRows(target) });
+  }
+  entries.push({ text: 'Insert Name', action: () => insertName(target) }, { text: 'Script as CREATE', action: () => void scriptCreate(target) }, 'separator');
+  return entries;
 }
 
 /** A node's entries for editing, dropping or creating objects, each also offered in the place Settings doesn't pick. */
@@ -87,6 +100,7 @@ export function rowMenu(row: TreeRow, rows: ReadonlyArray<TreeRow>): Array<MenuE
     }
     case 'node':
       return [
+        ...queryEntries(row, rows),
         ...editorEntries(row, rows),
         { text: 'Refresh', enabled: item.node.children !== null, action: () => void tree.refreshRow(row) },
         { text: 'Copy Name', action: () => void navigator.clipboard.writeText(item.node.label) },

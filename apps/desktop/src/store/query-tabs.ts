@@ -2,7 +2,7 @@ import { create } from 'zustand';
 import * as api from '../api/query';
 import { messageOf } from '../api/errors';
 import type { DraftFile } from '../generated/drafts';
-import type { RunResult, StatementResult, TransactionStatus } from '../generated/query';
+import type { RunResult, StatementResult, TransactionAction, TransactionStatus } from '../generated/query';
 import { runAnnouncement } from '../query/describe';
 import type { TabConnection } from '../query/default-connection';
 import { statementAt } from '../query/statements';
@@ -62,6 +62,8 @@ type QueryTabState = {
   run: (id: string, mode: RunMode) => Promise<void>;
   fetchMore: (id: string) => Promise<void>;
   cancel: (id: string) => Promise<void>;
+  /** Begins, commits or rolls back the tab's transaction, keeping its results on screen. */
+  control: (id: string, action: TransactionAction) => Promise<void>;
   /** Closes the tab, first asking when that would lose unsaved text or roll back a transaction the user began. */
   requestClose: (id: string) => void;
   closeTab: (id: string) => void;
@@ -71,6 +73,19 @@ type QueryTabState = {
   removeTab: (id: string) => void;
   /** The Rust core closed the tab's idle results on its own. */
   resultsClosed: (id: string) => void;
+};
+
+/** The result with its last statement's held rows closed, so it no longer offers to fetch more. */
+function withResultsClosed(result: RunResult): RunResult {
+  const last = result.statements[result.statements.length - 1] as StatementResult;
+  if (last.outcome.kind !== 'rows') return result;
+  return { ...result, statements: [...result.statements.slice(0, -1), { ...last, outcome: { ...last.outcome, has_more: false } }] };
+}
+
+const control_done: Readonly<Record<TransactionAction, string>> = {
+  begin: 'Transaction begun.',
+  commit: 'Committed.',
+  rollback: 'Rolled back.',
 };
 
 /** Opens the panel of the first failed statement, or else the last statement's. */
@@ -207,6 +222,27 @@ export const useQueryTabStore = create<QueryTabState>()((set, get) => {
       }
     },
 
+    control: async (id, action) => {
+      const tab = get().tabs[id];
+      if (!tab || tab.status !== 'idle') return;
+      if (!tab.connection) {
+        set({ announcement: 'Choose a connection for this tab first.' });
+        return;
+      }
+      update(id, { status: 'running', started_at: Date.now(), error: null });
+      try {
+        const done = await api.transactionControl(id, tab.connection.server_id, tab.connection.database, action);
+        const result = done.results_closed && tab.result ? withResultsClosed(tab.result) : tab.result;
+        update(id, { status: 'idle', started_at: null, transaction: done.transaction, result });
+        const notice = done.notices[0];
+        set({ announcement: notice ? `${control_done[action]} The server said: ${notice.message}.` : control_done[action] });
+      } catch (error) {
+        const message = messageOf(error);
+        update(id, { status: 'idle', started_at: null, error: message });
+        set({ announcement: message });
+      }
+    },
+
     cancel: async (id) => {
       try {
         await api.cancelQuery(id);
@@ -252,9 +288,7 @@ export const useQueryTabStore = create<QueryTabState>()((set, get) => {
       const tab = get().tabs[id];
       const last = tab?.result?.statements[tab.result.statements.length - 1];
       if (!tab?.result || last?.outcome.kind !== 'rows' || !last.outcome.has_more) return;
-      const statement: StatementResult = { ...last, outcome: { ...last.outcome, has_more: false } };
-      const result = { ...tab.result, statements: [...tab.result.statements.slice(0, -1), statement] };
-      update(id, { result, transaction: tab.transaction === 'holding_results' ? 'idle' : tab.transaction });
+      update(id, { result: withResultsClosed(tab.result), transaction: tab.transaction === 'holding_results' ? 'idle' : tab.transaction });
       set({ announcement: `${tab.title}: results closed after being left idle. Run the statement again to see more rows.` });
     },
   };
