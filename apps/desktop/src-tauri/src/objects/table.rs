@@ -3,7 +3,10 @@
 use std::collections::HashMap;
 
 use super::ddl::{Planned, comment_on, ident, qualified, required, warning};
-use super::model::{ChangeOptions, ColumnDefinition, ConstraintDefinition, ConstraintKind, Identity, IndexDefinition, ReferentialAction, TableDefinition};
+use super::model::{
+    ChangeOptions, ChangeWarning, ColumnDefinition, ConstraintDefinition, ConstraintKind, Identity, IndexDefinition, PolicyCommand, PolicyDefinition, ReferentialAction,
+    TableDefinition,
+};
 use crate::error::CommandError;
 
 fn invalid(message: String) -> CommandError {
@@ -100,6 +103,46 @@ fn index_sql(index: &IndexDefinition, table: &str, concurrently: bool) -> String
     format!("CREATE {unique}INDEX {concurrently}{name}ON {table} USING {} ({}){clauses}", index.method, index.keys)
 }
 
+/// The `FOR` keyword a policy names its command with, or `None` for every command, which needs none.
+fn policy_command(command: PolicyCommand) -> Option<&'static str> {
+    match command {
+        PolicyCommand::All => None,
+        PolicyCommand::Select => Some("SELECT"),
+        PolicyCommand::Insert => Some("INSERT"),
+        PolicyCommand::Update => Some("UPDATE"),
+        PolicyCommand::Delete => Some("DELETE"),
+    }
+}
+
+fn policy_sql(policy: &PolicyDefinition, table: &str) -> String {
+    let mut sql = format!("CREATE POLICY {} ON {table}", ident(&policy.name));
+    if !policy.permissive {
+        sql.push_str(" AS RESTRICTIVE");
+    }
+    if let Some(command) = policy_command(policy.command) {
+        sql.push_str(&format!(" FOR {command}"));
+    }
+    if !trimmed(&policy.roles).is_empty() {
+        sql.push_str(&format!(" TO {}", names(&policy.roles)));
+    }
+    for (clause, expression) in [("USING", &policy.using), ("WITH CHECK", &policy.with_check)] {
+        if !expression.trim().is_empty() {
+            sql.push_str(&format!(" {clause} ({})", expression.trim()));
+        }
+    }
+    sql
+}
+
+/// The warning for row-level security with no policy to let any row through.
+pub fn row_security_warning(table: &TableDefinition) -> Option<ChangeWarning> {
+    (table.row_security && table.policies.is_empty()).then(|| {
+        warning(
+            "No one but the owner sees any rows",
+            "Row-level security is on with no policies, so every row is hidden from everyone except the table's owner and roles that bypass it.",
+        )
+    })
+}
+
 fn validate_column(column: &ColumnDefinition, seen: &mut Vec<String>) -> Result<(), CommandError> {
     required(&column.name, "Each column's name")?;
     if column.data_type.trim().is_empty() {
@@ -153,6 +196,9 @@ pub fn validate(table: &TableDefinition) -> Result<(), CommandError> {
     for constraint in &table.constraints {
         validate_constraint(constraint)?;
     }
+    for policy in &table.policies {
+        required(&policy.name, "Each policy's name")?;
+    }
     for index in &table.indexes {
         if index.original_name.is_some() && index.name.trim().is_empty() {
             return Err(invalid("An existing index needs a name.".into()));
@@ -169,14 +215,21 @@ pub fn create_statement(table: &TableDefinition) -> String {
     format!("CREATE TABLE {} (\n  {}\n)", qualified(&table.schema, &table.name), lines.join(",\n  "))
 }
 
-/// What follows `CREATE TABLE` and the table's comment: its indexes and its columns' comments. A new table is empty, so
-/// its indexes build in the transaction even when marked concurrent.
+/// What follows `CREATE TABLE` and the table's comment: its indexes, its columns' comments, row-level security and its
+/// policies. A new table is empty, so its indexes build in the transaction even when marked concurrent.
 pub fn after_create(table: &TableDefinition) -> Vec<String> {
     let target = qualified(&table.schema, &table.name);
     let mut statements: Vec<String> = table.indexes.iter().map(|index| index_sql(index, &target, false)).collect();
     for column in table.columns.iter().filter(|column| column.comment.as_deref().is_some_and(|text| !text.is_empty())) {
         statements.push(comment_on(&format!("COLUMN {target}.{}", ident(&column.name)), &column.comment));
     }
+    if table.row_security {
+        statements.push(format!("ALTER TABLE {target} ENABLE ROW LEVEL SECURITY"));
+    }
+    if table.force_row_security {
+        statements.push(format!("ALTER TABLE {target} FORCE ROW LEVEL SECURITY"));
+    }
+    statements.extend(table.policies.iter().map(|policy| policy_sql(policy, &target)));
     statements
 }
 
@@ -294,6 +347,28 @@ fn column_actions(before: &ColumnDefinition, after: &ColumnDefinition, risks: &m
     Ok(actions)
 }
 
+/// Drops the policies that are gone or changed, renames those only renamed, and creates the new and changed ones.
+fn policy_changes(before: &TableDefinition, after: &TableDefinition, table: &str) -> Vec<String> {
+    let (policies, dropped) = matched(&before.policies, &after.policies, |policy| policy.original_name.clone());
+    let same = |left: &PolicyDefinition, right: &PolicyDefinition| PolicyDefinition { name: String::new(), ..left.clone() } == PolicyDefinition { name: String::new(), ..right.clone() };
+    let mut statements: Vec<String> = dropped.iter().map(|policy| format!("DROP POLICY {} ON {table}", ident(&policy.name))).collect();
+    for (original, policy) in &policies {
+        match original {
+            Some(original) if same(original, policy) => {
+                if original.name != policy.name {
+                    statements.push(format!("ALTER POLICY {} ON {table} RENAME TO {}", ident(&original.name), ident(&policy.name)));
+                }
+            }
+            Some(original) => {
+                statements.push(format!("DROP POLICY {} ON {table}", ident(&original.name)));
+                statements.push(policy_sql(policy, table));
+            }
+            None => statements.push(policy_sql(policy, table)),
+        }
+    }
+    statements
+}
+
 /// The DDL that changes `before` into `after`, except a new name, schema or table comment, which the caller adds.
 /// Everything runs against the table's original name; concurrent index builds, which come after, use its new one.
 pub fn alter(before: &TableDefinition, after: &TableDefinition, options: ChangeOptions) -> Result<Planned, CommandError> {
@@ -388,6 +463,12 @@ pub fn alter(before: &TableDefinition, after: &TableDefinition, options: ChangeO
         actions.push(format!("VALIDATE CONSTRAINT {}", ident(&constraint.name)));
         risks.checked.push(constraint.name.clone());
     }
+    if before.row_security != after.row_security {
+        actions.push(format!("{} ROW LEVEL SECURITY", if after.row_security { "ENABLE" } else { "DISABLE" }));
+    }
+    if before.force_row_security != after.force_row_security {
+        actions.push(format!("{} ROW LEVEL SECURITY", if after.force_row_security { "FORCE" } else { "NO FORCE" }));
+    }
 
     planned.statements.extend(renames);
     for (original, index) in &indexes {
@@ -413,8 +494,10 @@ pub fn alter(before: &TableDefinition, after: &TableDefinition, options: ChangeO
         }
     }
     planned.statements.extend(comments);
+    planned.statements.extend(policy_changes(before, after, &table));
     let drops = !dropped_columns.is_empty() | !planned.dropped_constraints.is_empty() | !dropped_indexes.is_empty();
     planned.warnings = risks.warnings(&table, options.cascade & drops);
+    planned.warnings.extend(row_security_warning(after));
     Ok(planned)
 }
 
@@ -478,6 +561,9 @@ mod tests {
             columns: vec![id, quantity, column(Some(3), "note", "text")],
             constraints: vec![constraint(Some("order_items_pkey"), "order_items_pkey", ConstraintKind::PrimaryKey, &["id"])],
             indexes: vec![index(Some("order_items_note"), "order_items_note", "note")],
+            row_security: false,
+            force_row_security: false,
+            policies: Vec::new(),
         }
     }
 
@@ -807,5 +893,76 @@ mod tests {
         assert_eq!(spoken(&["a".into(), "b".into(), "c".into()]), "a, b and c");
         assert_eq!(spoken(&[]), "");
         assert_eq!(referential(ReferentialAction::NoAction), "NO ACTION");
+    }
+
+    fn policy(original_name: Option<&str>, name: &str) -> PolicyDefinition {
+        PolicyDefinition {
+            original_name: original_name.map(str::to_string),
+            name: name.into(),
+            command: PolicyCommand::All,
+            permissive: true,
+            roles: Vec::new(),
+            using: String::new(),
+            with_check: String::new(),
+        }
+    }
+
+    #[test]
+    fn a_new_table_turns_on_row_level_security_and_creates_its_policies_and_warns_when_none_let_rows_through() {
+        let mut table = orders();
+        table.row_security = true;
+        table.force_row_security = true;
+        let mut own = policy(None, "own rows");
+        own.command = PolicyCommand::Select;
+        own.permissive = false;
+        own.roles = vec!["app".into(), "Reporting".into()];
+        own.using = " owner_id = current_user_id() ".into();
+        own.with_check = "true".into();
+        table.policies = vec![own, policy(None, "everyone")];
+
+        assert_eq!(after_create(&table)[1..], [
+            "ALTER TABLE public.order_items ENABLE ROW LEVEL SECURITY".to_string(),
+            "ALTER TABLE public.order_items FORCE ROW LEVEL SECURITY".to_string(),
+            "CREATE POLICY \"own rows\" ON public.order_items AS RESTRICTIVE FOR SELECT TO app, \"Reporting\" USING (owner_id = current_user_id()) WITH CHECK (true)".to_string(),
+            "CREATE POLICY everyone ON public.order_items".to_string(),
+        ]);
+        assert_eq!(row_security_warning(&table), None);
+        table.policies.clear();
+        assert_eq!(row_security_warning(&table).unwrap().title, "No one but the owner sees any rows");
+        let commands = [PolicyCommand::Insert, PolicyCommand::Update, PolicyCommand::Delete].map(policy_command);
+        assert_eq!(commands, [Some("INSERT"), Some("UPDATE"), Some("DELETE")]);
+        assert_eq!(validate(&TableDefinition { policies: vec![policy(None, "")], ..orders() }).unwrap_err().to_string(), "Each policy's name is required.");
+    }
+
+    #[test]
+    fn row_level_security_switches_in_the_alter_table_and_policies_are_renamed_or_dropped_and_recreated() {
+        let mut before = orders();
+        before.row_security = true;
+        before.force_row_security = true;
+        before.policies = vec![policy(Some("a"), "a"), policy(Some("b"), "b"), policy(Some("gone"), "gone"), policy(Some("same"), "same")];
+        let mut after = before.clone();
+        after.row_security = false;
+        after.force_row_security = false;
+        after.policies = vec![
+            policy(Some("a"), "renamed"),
+            PolicyDefinition { using: "true".into(), ..policy(Some("b"), "b") },
+            policy(Some("same"), "same"),
+            policy(None, "new"),
+        ];
+        let mut back_on = after.clone();
+        back_on.row_security = true;
+        back_on.force_row_security = true;
+
+        let planned = alter(&before, &after, options()).unwrap();
+
+        assert_eq!(planned.statements, [
+            "ALTER TABLE public.order_items\n  DISABLE ROW LEVEL SECURITY,\n  NO FORCE ROW LEVEL SECURITY",
+            "DROP POLICY gone ON public.order_items",
+            "ALTER POLICY a ON public.order_items RENAME TO renamed",
+            "DROP POLICY b ON public.order_items",
+            "CREATE POLICY b ON public.order_items USING (true)",
+            "CREATE POLICY new ON public.order_items",
+        ]);
+        assert_eq!(alter(&after, &back_on, options()).unwrap().statements[0], "ALTER TABLE public.order_items\n  ENABLE ROW LEVEL SECURITY,\n  FORCE ROW LEVEL SECURITY");
     }
 }

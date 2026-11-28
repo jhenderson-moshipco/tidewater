@@ -2,6 +2,7 @@
 
 pub mod databases;
 pub mod ddl;
+pub mod extras;
 pub mod model;
 pub mod table;
 pub mod types;
@@ -13,8 +14,9 @@ use ts_rs::TS;
 use crate::connections::{ConnectParams, describe, open};
 use crate::error::CommandError;
 use model::{
-    ApplyFailure, AvailableExtension, ChangeOptions, ChangePlan, ColumnDefinition, ConstraintDefinition, ConstraintKind, DatabaseDefinition, DomainCheck, EnumValue,
-    ExtensionDefinition, Identity, IndexDefinition, ObjectDefinition, ObjectRef, ObjectType, Parallel, ReferentialAction, TableDefinition, TypeAttribute,
+    ApplyFailure, ExtrasChange, ExtrasRead, Grant, ObjectExtras, TriggerDefinition, TriggerEvent, TriggerTiming, AvailableExtension, ChangeOptions, ChangePlan, ColumnDefinition, ConstraintDefinition, ConstraintKind, DatabaseDefinition, DomainCheck, EnumValue,
+    ExtensionDefinition, Identity, IndexDefinition, ObjectDefinition, ObjectRef, ObjectType, Parallel, PolicyCommand, PolicyDefinition, ReferentialAction,
+    TableDefinition, TypeAttribute,
     TypeDefinition, TypeKind, Volatility,
 };
 
@@ -82,7 +84,13 @@ SELECT n.nspname, c.relname, obj_description(c.oid, 'pg_class'), CASE WHEN c.rel
   (SELECT coalesce(json_agg(json_build_array(ic.relname, i.indisunique, am.amname, pg_get_indexdef(i.indexrelid)) ORDER BY ic.relname), '[]')::text
    FROM pg_index i JOIN pg_class ic ON ic.oid = i.indexrelid JOIN pg_am am ON am.oid = ic.relam
    WHERE i.indrelid = c.oid AND NOT EXISTS (SELECT 1 FROM pg_constraint k
-     WHERE k.conindid = i.indexrelid AND k.conrelid = i.indrelid AND k.contype IN ('p', 'u', 'x')))
+     WHERE k.conindid = i.indexrelid AND k.conrelid = i.indrelid AND k.contype IN ('p', 'u', 'x'))),
+  c.relrowsecurity, c.relforcerowsecurity,
+  (SELECT coalesce(json_agg(json_build_array(
+      p.polname, p.polcmd::text, p.polpermissive,
+      ARRAY(SELECT pg_get_userbyid(r) FROM unnest(p.polroles) r WHERE r <> 0 ORDER BY 1),
+      coalesce(pg_get_expr(p.polqual, p.polrelid), ''), coalesce(pg_get_expr(p.polwithcheck, p.polrelid), '')) ORDER BY p.polname), '[]')::text
+   FROM pg_policy p WHERE p.polrelid = c.oid)
 FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
 WHERE c.oid = $1 AND c.relkind IN ('r', 'p')";
 
@@ -114,6 +122,130 @@ SELECT a.name, coalesce(a.default_version, ''),
   a.installed_version IS NOT NULL, a.comment
 FROM pg_available_extensions a ORDER BY a.name";
 const ROLES: &str = "SELECT rolname FROM pg_roles WHERE rolname !~ '^pg_' ORDER BY rolname";
+/// A table's or view's own triggers, leaving out the internal ones behind foreign keys.
+const TRIGGERS: &str = "\
+SELECT coalesce(json_agg(json_build_array(
+    t.tgname, t.tgtype,
+    ARRAY(SELECT a.attname::text FROM unnest(t.tgattr::int2[]) WITH ORDINALITY u(n, i)
+          JOIN pg_attribute a ON a.attrelid = t.tgrelid AND a.attnum = u.n ORDER BY u.i),
+    t.tgfoid::regproc::text, pg_get_triggerdef(t.oid, true), t.tgenabled <> 'D') ORDER BY t.tgname), '[]')::text
+FROM pg_trigger t WHERE t.tgrelid = $1 AND NOT t.tgisinternal";
+const TRIGGER_FUNCTIONS: &str = "\
+SELECT p.oid::regproc::text FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
+WHERE p.prorettype = 'trigger'::regtype AND n.nspname NOT LIKE 'pg\\_%' AND n.nspname <> 'information_schema'
+ORDER BY 1";
+const CURRENT_USER: &str = "SELECT current_user::text";
+
+/// The catalog, owner column, ACL column and `acldefault` code for each kind with privileges.
+fn acl_columns(object_type: ObjectType) -> Option<(&'static str, &'static str, &'static str, &'static str)> {
+    match object_type {
+        ObjectType::Table | ObjectType::View | ObjectType::MaterializedView => Some(("pg_class", "relowner", "relacl", "r")),
+        ObjectType::Sequence => Some(("pg_class", "relowner", "relacl", "s")),
+        ObjectType::Function | ObjectType::Procedure => Some(("pg_proc", "proowner", "proacl", "f")),
+        ObjectType::Schema => Some(("pg_namespace", "nspowner", "nspacl", "n")),
+        ObjectType::Type => Some(("pg_type", "typowner", "typacl", "T")),
+        ObjectType::Database => Some(("pg_database", "datdba", "datacl", "d")),
+        ObjectType::Extension => None,
+    }
+}
+
+/// The object's owner and its grants to everyone else, from its ACL or the defaults Postgres gives it while it has none.
+fn grants_query(catalog: &str, owner: &str, acl: &str, code: &str) -> String {
+    format!(
+        "SELECT pg_get_userbyid(o.owner),
+           coalesce(json_agg(json_build_array(
+             CASE WHEN a.grantee = 0 THEN 'PUBLIC' ELSE pg_get_userbyid(a.grantee) END, a.privilege_type, a.is_grantable))
+             FILTER (WHERE a.grantee <> o.owner), '[]')::text
+         FROM (SELECT {owner} AS owner, {acl} AS acl FROM {catalog} WHERE oid = $1) o
+         LEFT JOIN LATERAL aclexplode(coalesce(o.acl, acldefault('{code}', o.owner))) a ON true
+         GROUP BY o.owner"
+    )
+}
+
+type TriggerRow = (String, i16, Vec<String>, String, String, bool);
+
+/// The text between the parentheses that open at `start`, and where the closing one is.
+fn balanced(text: &str, start: usize) -> Option<(String, usize)> {
+    let (mut depth, mut quoted) = (1, false);
+    for (offset, character) in text[start..].char_indices() {
+        match character {
+            '\'' => quoted = !quoted,
+            '(' if !quoted => depth += 1,
+            ')' if !quoted => depth -= 1,
+            _ => {}
+        }
+        if depth == 0 {
+            return Some((text[start..start + offset].to_string(), start + offset));
+        }
+    }
+    None
+}
+
+/// The text inside the parentheses after `marker` in a definition Postgres printed, or empty when there are none.
+fn clause(definition: &str, marker: &str) -> String {
+    definition.find(marker).and_then(|found| balanced(definition, found + marker.len())).map(|(inner, _)| inner).unwrap_or_default()
+}
+
+fn trigger(row: TriggerRow) -> TriggerDefinition {
+    let (name, kind, update_columns, function, definition, enabled) = row;
+    let has = |bit: i16| kind & bit != 0;
+    let timing = if has(64) { TriggerTiming::InsteadOf } else if has(2) { TriggerTiming::Before } else { TriggerTiming::After };
+    let events = [(4, TriggerEvent::Insert), (16, TriggerEvent::Update), (8, TriggerEvent::Delete), (32, TriggerEvent::Truncate)]
+        .into_iter()
+        .filter(|(bit, _)| has(*bit))
+        .map(|(_, event)| event)
+        .collect();
+    let arguments = clause(&definition, &format!(" EXECUTE FUNCTION {function}("));
+    TriggerDefinition {
+        original_name: Some(name.clone()),
+        name,
+        timing,
+        events,
+        update_columns,
+        for_each_row: has(1),
+        when: clause(&definition, " WHEN ("),
+        function,
+        arguments,
+        new_function: false,
+        body: String::new(),
+        enabled,
+    }
+}
+
+/// An object's grants and, for a table or view, its triggers, with its owner and the privileges its kind has. With no
+/// object, what a new one of `object_type` starts with: the grants Postgres gives PUBLIC, owned by the current user.
+pub async fn object_extras(client: &Client, object: Option<&ObjectRef>, object_type: ObjectType) -> Result<ExtrasRead, CommandError> {
+    let mut privileges: Vec<String> = extras::privileges_of(object_type).iter().map(|privilege| privilege.to_string()).collect();
+    let Some(object) = object else {
+        let owner = client.query_one(CURRENT_USER, &[]).await?.get(0);
+        return Ok(ExtrasRead { owner, privileges, extras: ObjectExtras { grants: extras::default_grants(object_type), triggers: Vec::new() } });
+    };
+    let mut read = ExtrasRead { owner: String::new(), privileges: Vec::new(), extras: ObjectExtras::default() };
+    if matches!(object_type, ObjectType::Table | ObjectType::View) {
+        let row = client.query_one(TRIGGERS, &[&object.oid]).await?;
+        read.extras.triggers = json_rows::<TriggerRow>(row.get(0)).into_iter().map(trigger).collect();
+    }
+    if let Some((catalog, owner, acl, code)) = acl_columns(object_type) {
+        let row = client.query_opt(&grants_query(catalog, owner, acl, code), &[&object.oid]).await?.ok_or_else(gone)?;
+        read.owner = row.get(0);
+        let grants: Vec<(String, String, bool)> = json_rows(row.get(1));
+        read.extras.grants = grants.into_iter().map(|(grantee, privilege, grantable)| Grant { grantee, privilege, grantable }).collect();
+    }
+    for grant in &read.extras.grants {
+        if !privileges.contains(&grant.privilege) {
+            privileges.push(grant.privilege.clone());
+        }
+    }
+    read.privileges = privileges;
+    Ok(read)
+}
+
+/// The database's trigger functions, as SQL names them, for a trigger to call.
+pub async fn trigger_functions(client: &Client) -> Result<Vec<String>, CommandError> {
+    let rows = client.query(TRIGGER_FUNCTIONS, &[]).await?;
+    Ok(rows.iter().map(|row| row.get(0)).collect())
+}
+
 /// Sessions on a database besides Tidewater's own, which Tidewater closes itself.
 const OTHER_SESSIONS: &str = "SELECT count(*) FROM pg_stat_activity WHERE datname = $1 AND application_name <> 'Tidewater'";
 
@@ -192,20 +324,10 @@ fn constraint_kind(code: &str, definition: &str) -> ConstraintKind {
 fn index_parts(definition: &str, method: &str) -> (String, String) {
     let marker = format!(" USING {method} (");
     let Some(start) = definition.find(&marker).map(|found| found + marker.len()) else { return (String::new(), String::new()) };
-    let (mut depth, mut quoted) = (1, false);
-    for (offset, character) in definition[start..].char_indices() {
-        match character {
-            '\'' => quoted = !quoted,
-            '(' if !quoted => depth += 1,
-            ')' if !quoted => depth -= 1,
-            _ => {}
-        }
-        if depth == 0 {
-            let end = start + offset;
-            return (definition[start..end].to_string(), definition[end + 1..].trim().to_string());
-        }
+    match balanced(definition, start) {
+        Some((keys, end)) => (keys, definition[end + 1..].trim().to_string()),
+        None => (definition[start..].to_string(), String::new()),
     }
-    (definition[start..].to_string(), String::new())
 }
 
 type ColumnRow = (i16, String, String, bool, String, String, String, Option<String>);
@@ -274,6 +396,23 @@ async fn type_definition(client: &Client, oid: u32) -> Result<ObjectDefinition, 
     }))
 }
 
+type PolicyRow = (String, String, bool, Vec<String>, String, String);
+
+fn policy_command(code: &str) -> PolicyCommand {
+    match code {
+        "r" => PolicyCommand::Select,
+        "a" => PolicyCommand::Insert,
+        "w" => PolicyCommand::Update,
+        "d" => PolicyCommand::Delete,
+        _ => PolicyCommand::All,
+    }
+}
+
+fn policy(row: PolicyRow) -> PolicyDefinition {
+    let (name, command, permissive, roles, using, with_check) = row;
+    PolicyDefinition { original_name: Some(name.clone()), name, command: policy_command(&command), permissive, roles, using, with_check }
+}
+
 async fn table_definition(client: &Client, oid: u32) -> Result<ObjectDefinition, CommandError> {
     let row = client.query_opt(TABLE, &[&oid]).await?.ok_or_else(gone)?;
     Ok(ObjectDefinition::Table(TableDefinition {
@@ -284,6 +423,9 @@ async fn table_definition(client: &Client, oid: u32) -> Result<ObjectDefinition,
         columns: json_rows(row.get(4)).into_iter().map(column).collect(),
         constraints: json_rows(row.get(5)).into_iter().map(constraint).collect(),
         indexes: json_rows(row.get(6)).into_iter().map(index).collect(),
+        row_security: row.get(7),
+        force_row_security: row.get(8),
+        policies: json_rows(row.get(9)).into_iter().map(policy).collect(),
     }))
 }
 
@@ -409,13 +551,19 @@ pub async fn plan(
     original: Option<&ObjectDefinition>,
     changed: Option<&ObjectDefinition>,
     options: ChangeOptions,
+    extras: Option<&ExtrasChange>,
 ) -> Result<ChangePlan, CommandError> {
     let mut view_replaceable = true;
     if let Some(query) = query_of(changed).filter(|query| !query.trim().is_empty() && query_of(original) != Some(query)) {
         let view_oid = object.filter(|object| object.object_type == ObjectType::View).map(|object| object.oid);
         view_replaceable = check_query(client, query, view_oid).await?;
     }
-    let planned = ddl::plan(original, changed, options, view_replaceable)?;
+    let mut planned = ddl::plan(original, changed, options, view_replaceable)?;
+    if let (Some(extras), Some(changed)) = (extras, changed) {
+        let statements = extras::plan(extras, changed, original.is_none() || planned.drops_original)?;
+        let lands_after_commit = original.is_none() && changed.object_type() == ObjectType::Database;
+        if lands_after_commit { planned.after_commit.extend(statements) } else { planned.statements.extend(statements) }
+    }
     let mut dependents = Vec::new();
     let drops_something = planned.drops_original || !planned.dropped_columns.is_empty() || !planned.dropped_constraints.is_empty();
     if let Some(object) = object.filter(|_| drops_something) {
@@ -551,6 +699,41 @@ mod tests {
     }
 
     #[test]
+    fn a_trigger_reads_its_timing_events_and_level_from_its_type_bits_and_its_condition_and_arguments_from_its_definition() {
+        let instead = trigger((
+            "write".into(),
+            1 | 4 | 64,
+            Vec::new(),
+            "public.f".into(),
+            "CREATE TRIGGER write INSTEAD OF INSERT ON v FOR EACH ROW EXECUTE FUNCTION public.f('a', ')')".into(),
+            true,
+        ));
+        let after = trigger((
+            "audit".into(),
+            8 | 16 | 32,
+            vec!["total".into()],
+            "f".into(),
+            "CREATE TRIGGER audit AFTER UPDATE OF total OR DELETE OR TRUNCATE ON t WHEN ((new.total > 0)) EXECUTE FUNCTION f()".into(),
+            false,
+        ));
+        let before = trigger(("b".into(), 2 | 4, Vec::new(), "f".into(), "CREATE TRIGGER b".into(), true));
+
+        assert_eq!((instead.timing, instead.events, instead.for_each_row, instead.arguments), (TriggerTiming::InsteadOf, vec![TriggerEvent::Insert], true, "'a', ')'".to_string()));
+        assert_eq!((after.timing, after.events, after.when, after.enabled), (
+            TriggerTiming::After,
+            vec![TriggerEvent::Update, TriggerEvent::Delete, TriggerEvent::Truncate],
+            "(new.total > 0)".to_string(),
+            false
+        ));
+        assert_eq!((before.timing, before.for_each_row, before.when, before.arguments), (TriggerTiming::Before, false, String::new(), String::new()));
+        assert_eq!(
+            ["r", "a", "w", "d", "*"].map(policy_command),
+            [PolicyCommand::Select, PolicyCommand::Insert, PolicyCommand::Update, PolicyCommand::Delete, PolicyCommand::All]
+        );
+        assert_eq!(acl_columns(ObjectType::Extension), None);
+    }
+
+    #[test]
     fn an_index_definition_splits_into_keys_and_the_clauses_after_them() {
         let parts = |definition: &str| index_parts(definition, "btree");
         assert_eq!(parts("CREATE INDEX i ON public.t USING btree (a, lower(b) DESC) INCLUDE (c) WHERE (a > 0)"), (
@@ -632,7 +815,7 @@ mod tests {
         let procedure = scratch.read(ObjectType::Procedure, scratch.oid(&routine("p")).await).await.unwrap();
         assert_eq!(procedure.object_type(), ObjectType::Procedure);
         let function_ref = scratch.object(ObjectType::Function, scratch.oid(&routine("f")).await);
-        let dropped = plan(&scratch.client, Some(&function_ref), Some(&function), None, options()).await.unwrap();
+        let dropped = plan(&scratch.client, Some(&function_ref), Some(&function), None, options(), None).await.unwrap();
         assert_eq!((dropped.statements.len(), dropped.dependents.len()), (1, 0));
 
         for object_type in [ObjectType::Schema, ObjectType::Sequence, ObjectType::View, ObjectType::MaterializedView, ObjectType::Function, ObjectType::Procedure] {
@@ -650,10 +833,10 @@ mod tests {
         let original = definition(&scratch.client, &object).await.unwrap();
         let with_query = |query: &str| ObjectDefinition::View { schema: scratch.schema.clone(), name: "v".into(), query: query.into(), comment: None };
 
-        let added = plan(&scratch.client, Some(&object), Some(&original), Some(&with_query("SELECT 1 AS n, 2 AS m")), options()).await.unwrap();
-        let renamed = plan(&scratch.client, Some(&object), Some(&original), Some(&with_query("SELECT 1 AS renamed")), options()).await.unwrap();
-        let retyped = plan(&scratch.client, Some(&object), Some(&original), Some(&with_query("SELECT 'one'::text AS n")), options()).await.unwrap();
-        let broken = plan(&scratch.client, Some(&object), Some(&original), Some(&with_query("SELEC 1")), options()).await;
+        let added = plan(&scratch.client, Some(&object), Some(&original), Some(&with_query("SELECT 1 AS n, 2 AS m")), options(), None).await.unwrap();
+        let renamed = plan(&scratch.client, Some(&object), Some(&original), Some(&with_query("SELECT 1 AS renamed")), options(), None).await.unwrap();
+        let retyped = plan(&scratch.client, Some(&object), Some(&original), Some(&with_query("SELECT 'one'::text AS n")), options(), None).await.unwrap();
+        let broken = plan(&scratch.client, Some(&object), Some(&original), Some(&with_query("SELEC 1")), options(), None).await;
 
         assert!(added.statements[0].starts_with("CREATE OR REPLACE VIEW"));
         assert!(renamed.statements[0].starts_with("DROP VIEW"));
@@ -669,11 +852,11 @@ mod tests {
         let scratch = Scratch::new("").await;
         let new_view = ObjectDefinition::MaterializedView { schema: scratch.schema.clone(), name: "m".into(), query: "SELECT 1 AS n".into(), comment: None };
 
-        let created = plan(&scratch.client, None, None, Some(&new_view), options()).await.unwrap();
+        let created = plan(&scratch.client, None, None, Some(&new_view), options(), None).await.unwrap();
 
         assert_eq!((created.statements.len(), created.dependents.len()), (1, 0));
         let unnamed = ObjectDefinition::Schema { name: String::new(), comment: None };
-        assert_eq!(plan(&scratch.client, None, None, Some(&unnamed), options()).await, Err(CommandError::Invalid("Name is required.".into())));
+        assert_eq!(plan(&scratch.client, None, None, Some(&unnamed), options(), None).await, Err(CommandError::Invalid("Name is required.".into())));
         scratch.finish().await;
     }
 
@@ -790,11 +973,11 @@ mod tests {
 
         let mut without_note = orders.clone();
         without_note.columns.remove(4);
-        let dropped_column = plan(&scratch.client, Some(&orders_ref), Some(&original), Some(&ObjectDefinition::Table(without_note)), options()).await.unwrap();
+        let dropped_column = plan(&scratch.client, Some(&orders_ref), Some(&original), Some(&ObjectDefinition::Table(without_note)), options(), None).await.unwrap();
         let mut without_key = customers.clone();
         without_key.constraints.clear();
         let customers_original = ObjectDefinition::Table(customers);
-        let dropped_key = plan(&scratch.client, Some(&customers_ref), Some(&customers_original), Some(&ObjectDefinition::Table(without_key)), options()).await.unwrap();
+        let dropped_key = plan(&scratch.client, Some(&customers_ref), Some(&customers_original), Some(&ObjectDefinition::Table(without_key)), options(), None).await.unwrap();
 
         assert_eq!(dropped_column.dependents, ["view notes"]);
         assert_eq!(dropped_key.dependents, ["constraint orders_customer_id_fkey on table orders"]);
@@ -810,7 +993,7 @@ mod tests {
             concurrently: true,
         });
         indexed.comment = Some("orders placed".into());
-        let built = plan(&scratch.client, Some(&orders_ref), Some(&original), Some(&ObjectDefinition::Table(indexed)), options()).await.unwrap();
+        let built = plan(&scratch.client, Some(&orders_ref), Some(&original), Some(&ObjectDefinition::Table(indexed)), options(), None).await.unwrap();
         let applied = apply(&live_params(), &built.statements, &built.after_commit).await.unwrap();
         let (_, after) = table(&scratch, "orders").await;
         assert_eq!((applied, after.indexes.len(), after.comment.as_deref()), (ApplyOutcome::Applied, 2, Some("orders placed")));
@@ -859,9 +1042,9 @@ mod tests {
         assert_eq!(serde_json::to_value(&extension).unwrap()["schema"], serde_json::json!(scratch.schema));
         let type_ref = scratch.object(ObjectType::Type, scratch.oid("SELECT '{schema}.mood'::regtype::oid").await);
         let mood_definition = ObjectDefinition::Type(mood.clone());
-        let dropped_type = plan(&scratch.client, Some(&type_ref), Some(&mood_definition), None, options()).await.unwrap();
+        let dropped_type = plan(&scratch.client, Some(&type_ref), Some(&mood_definition), None, options(), None).await.unwrap();
         let extension_ref = scratch.object(ObjectType::Extension, extension_oid);
-        let dropped_extension = plan(&scratch.client, Some(&extension_ref), Some(&extension), None, options()).await.unwrap();
+        let dropped_extension = plan(&scratch.client, Some(&extension_ref), Some(&extension), None, options(), None).await.unwrap();
         assert_eq!((dropped_type.dependents.len(), dropped_extension.dependents.len()), (0, 0));
         let available = available_extensions(&scratch.client).await.unwrap();
         let citext = available.iter().find(|candidate| candidate.name == "citext").unwrap();
@@ -888,7 +1071,7 @@ mod tests {
             connection_limit: 10,
             comment: Some("scratch".into()),
         });
-        let created = plan(&client, None, None, Some(&new_database), options()).await.unwrap();
+        let created = plan(&client, None, None, Some(&new_database), options(), None).await.unwrap();
         assert_eq!(apply(&live_params(), &created.statements, &created.after_commit).await.unwrap(), ApplyOutcome::Applied);
 
         let oid: u32 = client.query_one("SELECT oid FROM pg_database WHERE datname = $1", &[&name]).await.unwrap().get(0);
@@ -902,23 +1085,104 @@ mod tests {
         let (another, another_driver) = open(&ConnectParams { database: name.clone(), ..live_params() }).await.unwrap();
         another.batch_execute("SET application_name = 'someone else'").await.unwrap();
         let renamed = ObjectDefinition::Database(DatabaseDefinition { name: format!("{name}_2"), ..read_back.clone() });
-        let rename = plan(&client, Some(&object), Some(&read), Some(&renamed), options()).await.unwrap();
-        let drop = plan(&client, Some(&object), Some(&read), None, ChangeOptions { force: true, ..options() }).await.unwrap();
+        let rename = plan(&client, Some(&object), Some(&read), Some(&renamed), options(), None).await.unwrap();
+        let drop = plan(&client, Some(&object), Some(&read), None, ChangeOptions { force: true, ..options() }, None).await.unwrap();
 
         let titles = |plan: &ChangePlan| plan.warnings.iter().map(|warning| warning.title.clone()).collect::<Vec<_>>();
         assert_eq!(titles(&rename), ["Closes Tidewater's sessions on it", "Other sessions are connected"]);
         assert_eq!(rename.warnings[1].detail, format!("2 other sessions are connected to {name}. Renaming it fails while they are."));
         another_driver.abort();
         let _ = another_driver.await;
-        let alone = plan(&client, Some(&object), Some(&read), Some(&renamed), options()).await.unwrap();
+        let alone = plan(&client, Some(&object), Some(&read), Some(&renamed), options(), None).await.unwrap();
         assert_eq!(alone.warnings[1].detail, format!("1 other session is connected to {name}. Renaming it fails while they are."));
         assert!(drop.warnings[1].detail.ends_with("Dropping it fails while they are, unless FORCE disconnects them."));
         assert_eq!(drop.closes_database.as_deref(), Some(name.as_str()));
         assert_eq!(apply(&live_params(), &drop.statements, &drop.after_commit).await.unwrap(), ApplyOutcome::Applied);
         assert_eq!(client.query_one("SELECT count(*) FROM pg_database WHERE datname = $1", &[&name]).await.unwrap().get::<_, i64>(0), 0);
-        let quiet = plan(&client, Some(&object), Some(&read), None, options()).await.unwrap();
+        let quiet = plan(&client, Some(&object), Some(&read), None, options(), None).await.unwrap();
         assert_eq!(titles(&quiet), ["Closes Tidewater's sessions on it"]);
         other_driver.abort();
+        driver.abort();
+    }
+
+    #[tokio::test]
+    #[ignore = "needs TIDEWATER_TEST_DATABASE_URL pointing at a running Postgres"]
+    async fn live_grants_triggers_and_policies_read_back_and_an_extras_change_applies() {
+        let role = format!("tw_reader_{}", uuid::Uuid::new_v4().simple());
+        let scratch = Scratch::new(&format!(
+            "CREATE ROLE {role};
+             CREATE TABLE orders (id int, total numeric);
+             CREATE FUNCTION touch() RETURNS trigger LANGUAGE plpgsql AS $$BEGIN RETURN NEW; END$$;
+             CREATE TRIGGER stamp BEFORE UPDATE OF total ON orders FOR EACH ROW WHEN (new.total > 0) EXECUTE FUNCTION touch('x');
+             ALTER TABLE orders DISABLE TRIGGER stamp;
+             CREATE VIEW v AS SELECT id FROM orders;
+             CREATE TRIGGER write INSTEAD OF INSERT ON v FOR EACH ROW EXECUTE FUNCTION touch();
+             GRANT SELECT ON orders TO PUBLIC;
+             GRANT INSERT ON orders TO {role} WITH GRANT OPTION;
+             GRANT MAINTAIN ON orders TO {role};
+             CREATE SEQUENCE ids; CREATE TYPE mood AS ENUM ('ok');
+             ALTER TABLE orders ENABLE ROW LEVEL SECURITY;
+             CREATE POLICY own ON orders AS RESTRICTIVE FOR SELECT TO {role} USING (id > 0);"
+        ))
+        .await;
+        let orders = scratch.object(ObjectType::Table, scratch.oid("SELECT '{schema}.orders'::regclass::oid").await);
+        let view = scratch.object(ObjectType::View, scratch.oid("SELECT '{schema}.v'::regclass::oid").await);
+
+        let read = object_extras(&scratch.client, Some(&orders), ObjectType::Table).await.unwrap();
+        let stamp = &read.extras.triggers[0];
+        assert_eq!(read.owner, live_params().user);
+        assert_eq!(
+            (stamp.name.as_str(), stamp.update_columns.clone(), stamp.when.as_str(), stamp.arguments.as_str(), stamp.enabled),
+            ("stamp", vec!["total".to_string()], "new.total > 0::numeric", "'x'", false)
+        );
+        assert!(read.extras.grants.contains(&Grant { grantee: "PUBLIC".into(), privilege: "SELECT".into(), grantable: false }));
+        assert!(read.extras.grants.contains(&Grant { grantee: role.clone(), privilege: "INSERT".into(), grantable: true }));
+        assert!(read.privileges.starts_with(&["SELECT".to_string(), "INSERT".to_string()]));
+        let view_read = object_extras(&scratch.client, Some(&view), ObjectType::View).await.unwrap();
+        assert_eq!(view_read.extras.triggers.iter().map(|trigger| trigger.timing).collect::<Vec<_>>(), [TriggerTiming::InsteadOf]);
+        let table: TableDefinition = serde_json::from_value(serde_json::to_value(scratch.read(ObjectType::Table, orders.oid).await.unwrap()).unwrap()).unwrap();
+        assert_eq!((table.row_security, table.force_row_security), (true, false));
+        assert_eq!(table.policies, [PolicyDefinition {
+            original_name: Some("own".into()),
+            name: "own".into(),
+            command: PolicyCommand::Select,
+            permissive: false,
+            roles: vec![role.clone()],
+            using: "(id > 0)".into(),
+            with_check: String::new(),
+        }]);
+        assert!(read.privileges.ends_with(&["MAINTAIN".to_string()]));
+        let owners = [
+            (ObjectType::Sequence, "SELECT '{schema}.ids'::regclass::oid"),
+            (ObjectType::Function, "SELECT '{schema}.touch'::regproc::oid"),
+            (ObjectType::Type, "SELECT '{schema}.mood'::regtype::oid"),
+            (ObjectType::Database, "SELECT oid FROM pg_database WHERE datname = current_database()"),
+        ];
+        for (object_type, sql) in owners {
+            let object = scratch.object(object_type, scratch.oid(sql).await);
+            assert_eq!(object_extras(&scratch.client, Some(&object), object_type).await.unwrap().owner, live_params().user, "{object_type:?}");
+        }
+        let extension = object_extras(&scratch.client, Some(&scratch.object(ObjectType::Extension, 1)), ObjectType::Extension).await.unwrap();
+        assert_eq!((extension.privileges.len(), extension.extras), (0, ObjectExtras::default()));
+        let fresh = object_extras(&scratch.client, None, ObjectType::Function).await.unwrap();
+        assert_eq!((fresh.owner, fresh.extras.grants.len(), fresh.privileges), (live_params().user, 1, vec!["EXECUTE".to_string()]));
+        assert!(trigger_functions(&scratch.client).await.unwrap().contains(&"touch".to_string()));
+        let missing = object_extras(&scratch.client, Some(&scratch.object(ObjectType::Schema, 0)), ObjectType::Schema).await;
+        assert_eq!(missing.map_err(|error| crate::testing::parts(error).0).map(|_| ()), Err("not_found".to_string()));
+
+        let mut changed = read.extras.clone();
+        changed.grants.retain(|grant| grant.grantee != "PUBLIC");
+        changed.triggers[0].enabled = true;
+        let definition = ObjectDefinition::Table(table);
+        let extras = ExtrasChange { original: read.extras.clone(), changed };
+        let planned = plan(&scratch.client, Some(&orders), Some(&definition), Some(&definition), options(), Some(&extras)).await.unwrap();
+        assert_eq!(apply(&live_params(), &planned.statements, &planned.after_commit).await.unwrap(), ApplyOutcome::Applied);
+        let after = object_extras(&scratch.client, Some(&orders), ObjectType::Table).await.unwrap();
+        assert!(after.extras.triggers[0].enabled && after.extras.grants.iter().all(|grant| grant.grantee != "PUBLIC"));
+
+        scratch.finish().await;
+        let (client, driver) = open(&live_params()).await.unwrap();
+        client.batch_execute(&format!("DROP ROLE {role}")).await.unwrap();
         driver.abort();
     }
 
@@ -938,9 +1202,9 @@ mod tests {
             assert_eq!(fails(definition(&client, &object(object_type)).await.map(|_| ())), Err("connection".into()), "{object_type:?}");
         }
         let changed_view = ObjectDefinition::View { schema: "public".into(), name: "v".into(), query: "SELECT 2".into(), comment: None };
-        let replanned = plan(&client, Some(&object(ObjectType::View)), Some(&view), Some(&changed_view), options()).await;
+        let replanned = plan(&client, Some(&object(ObjectType::View)), Some(&view), Some(&changed_view), options(), None).await;
         assert_eq!(fails(replanned.map(|_| ())), Err("connection".into()));
-        let dropped = plan(&client, Some(&object(ObjectType::Schema)), Some(&schema), None, options()).await;
+        let dropped = plan(&client, Some(&object(ObjectType::Schema)), Some(&schema), None, options(), None).await;
         assert_eq!(fails(dropped.map(|_| ())), Err("connection".into()));
         let database = |name: &str| {
             ObjectDefinition::Database(DatabaseDefinition {
@@ -954,7 +1218,36 @@ mod tests {
                 comment: None,
             })
         };
-        let renamed = plan(&client, None, Some(&database("a")), Some(&database("b")), options()).await;
+        let renamed = plan(&client, None, Some(&database("a")), Some(&database("b")), options(), None).await;
+        let extras = ExtrasChange { original: ObjectExtras::default(), changed: ObjectExtras { grants: vec![Grant { grantee: "app".into(), privilege: "CONNECT".into(), grantable: false }], triggers: Vec::new() } };
+        let created = plan(&client, None, None, Some(&database("c")), options(), Some(&extras)).await.unwrap();
+        assert_eq!(created.after_commit, [
+            "CREATE DATABASE c",
+            "REVOKE CONNECT, TEMPORARY ON DATABASE c FROM PUBLIC",
+            "GRANT CONNECT ON DATABASE c TO app"
+        ]);
+        for object_type in [ObjectType::Table, ObjectType::Schema] {
+            assert_eq!(fails(object_extras(&client, Some(&object(object_type)), object_type).await.map(|_| ())), Err("connection".into()), "{object_type:?}");
+        }
+        assert_eq!(fails(object_extras(&client, None, ObjectType::Table).await.map(|_| ())), Err("connection".into()));
+        assert_eq!(fails(trigger_functions(&client).await.map(|_| ())), Err("connection".into()));
+        let unnamed_trigger = TriggerDefinition {
+            original_name: None,
+            name: String::new(),
+            timing: TriggerTiming::Before,
+            events: vec![TriggerEvent::Insert],
+            update_columns: Vec::new(),
+            for_each_row: true,
+            when: String::new(),
+            function: "f".into(),
+            arguments: String::new(),
+            new_function: false,
+            body: String::new(),
+            enabled: true,
+        };
+        let invalid = ExtrasChange { original: ObjectExtras::default(), changed: ObjectExtras { grants: Vec::new(), triggers: vec![unnamed_trigger] } };
+        let refused = plan(&client, None, None, Some(&schema), options(), Some(&invalid)).await;
+        assert_eq!(refused.map_err(|error| crate::testing::parts(error).0).map(|_| ()), Err("invalid".into()));
         assert_eq!(fails(renamed.map(|_| ())), Err("connection".into()));
         assert_eq!(fails(available_extensions(&client).await.map(|_| ())), Err("connection".into()));
         assert_eq!(fails(role_names(&client).await.map(|_| ())), Err("connection".into()));

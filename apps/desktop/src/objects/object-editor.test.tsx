@@ -15,6 +15,7 @@ import {
   server,
   unlocked,
   viewDefinition,
+  editor_basics,
 } from '../testing/backend';
 import { renderWithUser } from '../testing/render';
 
@@ -34,6 +35,7 @@ const edit_view: EditorRequest = {
 
 function backend(handlers: Partial<Record<string, (args: Record<string, unknown>) => unknown>> = {}) {
   return mockCommands({
+    ...editor_basics,
     list_schemas: () => ['public', 'sales'],
     object_definition: () => viewDefinition(),
     plan_object_change: () => changePlan(),
@@ -329,7 +331,7 @@ describe('the designers', () => {
     await openEditor(create('view'));
 
     act(() => codeEditor('Query').dispatch({ selection: { anchor: 0 } }));
-    expect(commandsOf(calls)).toEqual(['list_schemas']);
+    expect(commandsOf(calls)).not.toContain('plan_object_change');
     act(() => codeEditor('Query').dispatch({ changes: { from: 0, insert: 'SELECT 1' } }));
 
     await waitFor(() => expect(within(preview()).getByRole('status').textContent).toBe('Name is required.'));

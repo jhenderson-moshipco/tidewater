@@ -14,6 +14,7 @@ import {
   server,
   typeDefinition,
   unlocked,
+  editor_basics,
 } from '../testing/backend';
 import { renderWithUser } from '../testing/render';
 
@@ -36,6 +37,7 @@ function request(object_type: EditorRequest['object_type'], mode: EditorRequest[
 
 async function openEditor(open: EditorRequest, definition: ObjectDefinition = typeDefinition(), handlers: Record<string, () => unknown> = {}) {
   const calls = mockCommands({
+    ...editor_basics,
     list_schemas: () => ['public', 'sales'],
     list_roles: () => ['app', 'reporting'],
     available_extensions: () => [availableExtension(), availableExtension({ name: 'hstore', installed: true, comment: null, versions: ['1.8'] })],
@@ -144,7 +146,7 @@ describe('the type designer', () => {
 describe('the database designer', () => {
   it('creates a database owned by the connecting role unless another is picked, with its template, encoding and locale', async () => {
     const { user, calls } = await openEditor(request('database', 'create'));
-    expect(commandsOf(calls)).toEqual(['list_roles']);
+    expect(commandsOf(calls)).toEqual(['list_roles', 'object_extras']);
     expect(combobox('Owner').value).toBe('');
 
     await user.type(textbox('Name'), 'shop');

@@ -1,3 +1,4 @@
+import type { ObjectDefinition, ObjectExtras } from '../generated/objects';
 import form from '../servers/servers.module.css';
 import { useObjectEditorStore, type ObjectEditor } from '../store/object-editors';
 
@@ -81,3 +82,23 @@ export function SchemaField({ model }: { model: { editor: ObjectEditor; value: s
 }
 
 export const keywords = (...values: Array<string>) => values.map((value) => ({ value, label: value.toUpperCase() }));
+
+/** Changes the editor's draft with `change`, reading it as it is now so quick edits don't overwrite each other. */
+export function updateDraft<T extends ObjectDefinition>(editor_id: string, change: (draft: T) => T): void {
+  const store = useObjectEditorStore.getState();
+  store.change(editor_id, change((store.editors[editor_id] as ObjectEditor).draft as T));
+}
+
+/** Changes the editor's grants and triggers with `change`, reading them as they are now. */
+export function updateExtras(editor_id: string, change: (extras: ObjectExtras) => ObjectExtras): void {
+  const store = useObjectEditorStore.getState();
+  store.changeExtras(editor_id, change((store.editors[editor_id] as ObjectEditor).extras as ObjectExtras));
+}
+
+export function replaced<T>(list: ReadonlyArray<T>, index: number, item: T): Array<T> {
+  return list.map((current, position) => (position === index ? item : current));
+}
+
+export function without<T>(list: ReadonlyArray<T>, index: number): Array<T> {
+  return list.filter((_, position) => position !== index);
+}

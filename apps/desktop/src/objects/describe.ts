@@ -78,7 +78,19 @@ export function blankDefinition(type: ObjectType, schema: string): ObjectDefinit
         checks: [],
       };
     case 'table':
-      return { type: 'table', schema, name: '', comment: null, partition_key: null, columns: [blankColumn()], constraints: [], indexes: [] };
+      return {
+        type: 'table',
+        schema,
+        name: '',
+        comment: null,
+        partition_key: null,
+        columns: [blankColumn()],
+        constraints: [],
+        indexes: [],
+        row_security: false,
+        force_row_security: false,
+        policies: [],
+      };
     case 'sequence':
       return {
         type: 'sequence',

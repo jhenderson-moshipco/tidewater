@@ -41,7 +41,7 @@ pub fn literal(text: &str) -> String {
 }
 
 /// The body between dollar quotes whose tag doesn't appear inside it.
-fn dollar_quoted(body: &str) -> String {
+pub(super) fn dollar_quoted(body: &str) -> String {
     let tag = std::iter::once(String::new())
         .chain(std::iter::once("body".to_string()))
         .chain((1..).map(|number| format!("tw{number}")))
@@ -250,13 +250,15 @@ fn create(definition: &ObjectDefinition, options: ChangeOptions) -> Planned {
     if comment(definition).as_deref().is_some_and(|text| !text.is_empty()) {
         statements.push(comment_on(&format!("{} {}", keyword(definition), target(definition)), comment(definition)));
     }
+    let mut warnings = Vec::new();
     if let ObjectDefinition::Table(table) = definition {
         statements.extend(table::after_create(table));
+        warnings.extend(table::row_security_warning(table));
     }
     if let ObjectDefinition::Database(_) = definition {
         return Planned { after_commit: statements, ..Planned::default() };
     }
-    Planned { statements, ..Planned::default() }
+    Planned { statements, warnings, ..Planned::default() }
 }
 
 fn drop(definition: &ObjectDefinition, options: ChangeOptions) -> Planned {
@@ -345,6 +347,12 @@ fn recreate(original: &ObjectDefinition, changed: &ObjectDefinition, options: Ch
         planned.statements.push(comment_on(&format!("{} {}", keyword(changed), target(&renamed_identity(changed))), comment(changed)));
     }
     planned
+}
+
+/// How `GRANT … ON` names a definition once its DDL has run: by its new name and schema, and for a routine that was
+/// just created or recreated by name alone, since the identity arguments it carries may be its old ones.
+pub(super) fn grant_target(definition: &ObjectDefinition, fresh: bool) -> String {
+    if fresh { target(&renamed_identity(definition)) } else { target(definition) }
 }
 
 /// A changed routine is named by schema and name alone once recreated, since its old identity arguments may not match.
@@ -730,6 +738,9 @@ mod tests {
             columns: Vec::new(),
             constraints: Vec::new(),
             indexes: Vec::new(),
+            row_security: false,
+            force_row_security: false,
+            policies: Vec::new(),
         }
     }
 

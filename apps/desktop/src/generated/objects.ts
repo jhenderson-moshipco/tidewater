@@ -159,6 +159,29 @@ schema: string,
  */
 version: string, comment: string | null, };
 
+/**
+ * The extras before and after an edit, planned with the definition.
+ */
+export type ExtrasChange = { original: ObjectExtras, changed: ObjectExtras, };
+
+/**
+ * An object's extras as they are, with its owner and the privileges its kind has, in the order a grid shows them.
+ */
+export type ExtrasRead = { owner: string, privileges: Array<string>, extras: ObjectExtras, };
+
+/**
+ * A privilege a role holds on an object.
+ */
+export type Grant = { 
+/**
+ * The role, or `PUBLIC` for every role.
+ */
+grantee: string, privilege: string, 
+/**
+ * Whether the grantee can grant it on (WITH GRANT OPTION).
+ */
+grantable: boolean, };
+
 export type Identity = "none" | "always" | "by_default";
 
 export type IndexDefinition = { 
@@ -205,6 +228,15 @@ identity_arguments: string,
 returns: string, language: string, volatility: Volatility, security_definer: boolean, parallel: Parallel, body: string, comment: string | null, } | { "type": "table" } & TableDefinition | { "type": "type" } & TypeDefinition | { "type": "extension" } & ExtensionDefinition | { "type": "database" } & DatabaseDefinition;
 
 /**
+ * What an object has besides its definition: its grants, and a table's or view's triggers.
+ */
+export type ObjectExtras = { 
+/**
+ * The grants to roles other than the owner.
+ */
+grants: Array<Grant>, triggers: Array<TriggerDefinition>, };
+
+/**
  * An existing object, by its database and oid.
  */
 export type ObjectRef = { database: string, object_type: ObjectType, oid: number, };
@@ -212,6 +244,33 @@ export type ObjectRef = { database: string, object_type: ObjectType, oid: number
 export type ObjectType = "database" | "extension" | "schema" | "table" | "type" | "sequence" | "view" | "materialized_view" | "function" | "procedure";
 
 export type Parallel = "unsafe" | "restricted" | "safe";
+
+export type PolicyCommand = "all" | "select" | "insert" | "update" | "delete";
+
+/**
+ * A row-level security policy on a table.
+ */
+export type PolicyDefinition = { 
+/**
+ * The policy's name in the database; null for a new one.
+ */
+original_name: string | null, name: string, command: PolicyCommand, 
+/**
+ * Permissive policies widen what a role sees; restrictive ones narrow it.
+ */
+permissive: boolean, 
+/**
+ * The roles it applies to; empty for every role (PUBLIC).
+ */
+roles: Array<string>, 
+/**
+ * Which existing rows it lets through; empty for none of its own.
+ */
+using: string, 
+/**
+ * Which new or changed rows it accepts; empty for none of its own.
+ */
+with_check: string, };
 
 export type ReferentialAction = "no_action" | "restrict" | "cascade" | "set_null" | "set_default";
 
@@ -226,7 +285,52 @@ partition_key: string | null, columns: Array<ColumnDefinition>, constraints: Arr
 /**
  * The table's indexes, leaving out those that back a primary key or unique constraint.
  */
-indexes: Array<IndexDefinition>, };
+indexes: Array<IndexDefinition>, 
+/**
+ * Whether row-level security filters rows by the table's policies.
+ */
+row_security: boolean, 
+/**
+ * Whether the policies apply to the table's owner too.
+ */
+force_row_security: boolean, policies: Array<PolicyDefinition>, };
+
+/**
+ * A trigger on a table or view.
+ */
+export type TriggerDefinition = { 
+/**
+ * The trigger's name in the database; null for a new one.
+ */
+original_name: string | null, name: string, timing: TriggerTiming, events: Array<TriggerEvent>, 
+/**
+ * The columns an UPDATE must touch to fire it; empty for any.
+ */
+update_columns: Array<string>, 
+/**
+ * Fire once per row rather than once per statement.
+ */
+for_each_row: boolean, 
+/**
+ * The condition a row must meet to fire it; empty for none.
+ */
+when: string, 
+/**
+ * The trigger function, as SQL names it.
+ */
+function: string, 
+/**
+ * The arguments passed to the function, as SQL writes them.
+ */
+arguments: string, 
+/**
+ * Create `function` in the same change, as a PL/pgSQL function with `body`.
+ */
+new_function: boolean, body: string, enabled: boolean, };
+
+export type TriggerEvent = "insert" | "update" | "delete" | "truncate";
+
+export type TriggerTiming = "before" | "after" | "instead_of";
 
 export type TypeAttribute = { 
 /**

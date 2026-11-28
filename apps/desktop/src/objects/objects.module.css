@@ -374,3 +374,23 @@
   flex: 1 1 0;
   min-width: 0;
 }
+
+.grantCell {
+  padding: 0;
+  text-align: center;
+}
+
+.grantOption {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  margin-left: 6px;
+  color: var(--tw-text-muted);
+  font-size: var(--tw-font-size-small);
+}
+
+.body {
+  height: auto;
+  padding: 8px 10px;
+  resize: vertical;
+}

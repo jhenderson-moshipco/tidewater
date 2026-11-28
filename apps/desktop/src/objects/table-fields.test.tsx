@@ -4,7 +4,9 @@ import type { ObjectDefinition, TableDefinition } from '../generated/objects';
 import { Workspace } from '../shell/workspace';
 import { useObjectEditorStore, type EditorRequest, type ObjectEditor } from '../store/object-editors';
 import { useServerStore } from '../store/servers';
-import { changePlan, mockCommands, objectRef, server, tableDefinition, unlocked } from '../testing/backend';
+import { changePlan, mockCommands, objectRef, server, tableDefinition, unlocked,
+  editor_basics,
+} from '../testing/backend';
 import { renderWithUser } from '../testing/render';
 
 const draft = () => (Object.values(useObjectEditorStore.getState().editors)[0] as ObjectEditor).draft as TableDefinition;
@@ -22,6 +24,7 @@ const create_table: EditorRequest = { ...edit_table, mode: 'create', object: nul
 
 async function openTable(request: EditorRequest = edit_table, definition: ObjectDefinition = tableDefinition(), environment: 'dev' | 'prod' = 'dev') {
   mockCommands({
+    ...editor_basics,
     list_schemas: () => ['public', 'sales'],
     object_definition: () => definition,
     plan_object_change: () => changePlan(),
@@ -128,7 +131,7 @@ describe('the columns of a table', () => {
 });
 
 describe('the sections of a table', () => {
-  it('moves between columns, constraints and indexes with the arrow keys, Home and End', async () => {
+  it('moves between the sections with the arrow keys, Home and End, wrapping at either end', async () => {
     await openTable();
     const columns = section(/^Columns/);
     expect(columns.textContent).toBe('Columns 3');
@@ -137,10 +140,10 @@ describe('the sections of a table', () => {
     expect(section(/^Constraints/).getAttribute('aria-selected')).toBe('true');
     expect(document.activeElement).toBe(section(/^Constraints/));
     fireEvent.keyDown(section(/^Constraints/), { key: 'End' });
-    expect(section(/^Indexes/).getAttribute('aria-selected')).toBe('true');
-    fireEvent.keyDown(section(/^Indexes/), { key: 'ArrowRight' });
+    expect(section(/^Privileges/).getAttribute('aria-selected')).toBe('true');
+    fireEvent.keyDown(section(/^Privileges/), { key: 'ArrowRight' });
     fireEvent.keyDown(section(/^Columns/), { key: 'ArrowLeft' });
-    fireEvent.keyDown(section(/^Indexes/), { key: 'Home' });
+    fireEvent.keyDown(section(/^Privileges/), { key: 'Home' });
     fireEvent.keyDown(section(/^Columns/), { key: 'a' });
 
     expect(screen.getByRole('tabpanel', { name: 'Columns 3' })).toBeTruthy();
